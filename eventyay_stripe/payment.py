@@ -111,7 +111,7 @@ class StripeSettingsHolder(BasePaymentProvider):
             )
         else:
             message = _(
-                'Please configure a %(link) to '
+                'Please configure a %(link)s to '
                 'the following endpoint in order to automatically cancel orders when charges are refunded '
                 'externally and to process asynchronous payment methods like SOFORT.'
             ) % {'link': '<a href="https://dashboard.stripe.com/account/webhooks">Stripe Webhook</a>'}
