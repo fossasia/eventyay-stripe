@@ -7,13 +7,13 @@ from django.template.loader import get_template
 from django.urls import resolve, reverse
 from django.utils.translation import gettext_lazy as _
 
-from pretix.base.forms import SecretKeySettingsField
-from pretix.base.settings import settings_hierarkey
-from pretix.base.signals import (
+from eventyay.base.forms import SecretKeySettingsField
+from eventyay.base.settings import settings_hierarkey
+from eventyay.base.signals import (
     logentry_display, register_global_settings, register_payment_providers,
 )
-from pretix.control.signals import nav_organizer
-from pretix.presale.signals import html_head
+from eventyay.control.signals import nav_organizer
+from eventyay.presale.signals import html_head
 
 from .forms import StripeKeyValidator
 
@@ -59,7 +59,7 @@ def html_head_presale(sender, request=None, **kwargs):
 
 @receiver(signal=logentry_display, dispatch_uid="stripe_logentry_display")
 def pretixcontrol_logentry_display(sender, logentry, **kwargs):
-    if logentry.action_type != 'pretix.plugins.stripe.event':
+    if logentry.action_type != 'eventyay.plugins.stripe.event':
         return
 
     data = json.loads(logentry.data)

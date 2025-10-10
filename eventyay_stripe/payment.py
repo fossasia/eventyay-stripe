@@ -26,21 +26,21 @@ from django_countries.fields import Country
 from geoip2.errors import AddressNotFoundError
 from pydantic import ValidationError
 
-from pretix.base.decimal import round_decimal
-from pretix.base.forms import SecretKeySettingsField
-from pretix.base.forms.questions import guess_country
-from pretix.base.models import (
+from eventyay.base.decimal import round_decimal
+from eventyay.base.forms import SecretKeySettingsField
+from eventyay.base.forms.questions import guess_country
+from eventyay.base.models import (
     Event, InvoiceAddress, Order, OrderPayment, OrderRefund, Quota,
 )
-from pretix.base.payment import BasePaymentProvider, PaymentException
-from pretix.base.plugins import get_all_plugins
-from pretix.base.services.mail import SendMailException
-from pretix.base.settings import SettingsSandbox
-from pretix.helpers.countries import CachedCountries
-from pretix.helpers.http import get_client_ip
-from pretix.helpers.urls import build_absolute_uri as build_global_uri
-from pretix.multidomain.urlreverse import build_absolute_uri
-from pretix.presale.views.cart import cart_session
+from eventyay.base.payment import BasePaymentProvider, PaymentException
+from eventyay.base.plugins import get_all_plugins
+from eventyay.base.services.mail import SendMailException
+from eventyay.base.settings import SettingsSandbox
+from eventyay.helpers.countries import CachedCountries
+from eventyay.helpers.http import get_client_ip
+from eventyay.helpers.urls import build_absolute_uri as build_global_uri
+from eventyay.multidomain.urlreverse import build_absolute_uri
+from eventyay.presale.views.cart import cart_session
 
 from . import __version__
 from .forms import StripeKeyValidator
@@ -91,7 +91,7 @@ class StripeSettingsHolder(BasePaymentProvider):
                 ).format(
                     _(
                         "To accept payments via Stripe, you will need an account at Stripe. By clicking on the "
-                        "following button, you can either create a new Stripe account connect pretix to an existing "
+                        "following button, you can either create a new Stripe account connect eventyay to an existing "
                         "one."
                     ),
                     self.get_connect_url(request),
@@ -111,7 +111,7 @@ class StripeSettingsHolder(BasePaymentProvider):
             )
         else:
             message = _(
-                'Please configure a %(link)s to '
+                'Please configure a %%(link)s to '
                 'the following endpoint in order to automatically cancel orders when charges are refunded '
                 'externally and to process asynchronous payment methods like SOFORT.'
             ) % {'link': '<a href="https://dashboard.stripe.com/account/webhooks">Stripe Webhook</a>'}
@@ -122,7 +122,7 @@ class StripeSettingsHolder(BasePaymentProvider):
 
     @property
     def settings_form_fields(self):
-        if 'pretix_resellers' in [p.module for p in get_all_plugins()]:
+        if 'eventyay_resellers' in [p.module for p in get_all_plugins()]:
             moto_settings = [
                 (
                     "reseller_moto",
@@ -996,7 +996,7 @@ class StripeMethod(BasePaymentProvider):
 
         for le in (
             obj.order.all_logentries()
-            .filter(action_type="pretix.plugins.stripe.event")
+            .filter(action_type="eventyay.plugins.stripe.event")
             .exclude(data="", shredded=True)
         ):
             d = le.parsed_data
@@ -1058,7 +1058,7 @@ class StripeMethod(BasePaymentProvider):
             refund.execution_date = now()
             refund.save()
             refund.order.log_action(
-                "pretix.event.order.refund.failed",
+                "eventyay.event.order.refund.failed",
                 {
                     "local_id": refund.local_id,
                     "provider": refund.provider,

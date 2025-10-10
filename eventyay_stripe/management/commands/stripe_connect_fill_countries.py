@@ -2,8 +2,8 @@ import stripe
 from django.core.management.base import BaseCommand
 from django_scopes import scopes_disabled
 
-from pretix.base.models import Event
-from pretix.base.settings import GlobalSettingsObject
+from eventyay.base.models import Event
+from eventyay.base.settings import GlobalSettingsObject
 
 
 class Command(BaseCommand):
@@ -18,7 +18,7 @@ class Command(BaseCommand):
             self.stderr.write(self.style.ERROR("Stripe Connect is not set up!"))
             return
 
-        for e in Event.objects.filter(plugins__icontains="pretix.plugins.stripe"):
+        for e in Event.objects.filter(plugins__icontains="eventyay.plugins.stripe"):
             uid = e.settings.payment_stripe_connect_user_id
             if uid and not e.settings.payment_stripe_merchant_country:
                 if uid in cache:
