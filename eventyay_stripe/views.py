@@ -21,21 +21,21 @@ from django.views.decorators.http import require_POST
 from django.views.generic import FormView
 from django_scopes import scopes_disabled
 
-from pretix.base.models import Event, Order, OrderPayment, Organizer, Quota
-from pretix.base.payment import PaymentException
-from pretix.base.services.locking import LockTimeoutException
-from pretix.base.settings import GlobalSettingsObject
-from pretix.control.permissions import (
+from eventyay.base.models import Event, Order, OrderPayment, Organizer, Quota
+from eventyay.base.payment import PaymentException
+from eventyay.base.services.locking import LockTimeoutException
+from eventyay.base.settings import GlobalSettingsObject
+from eventyay.control.permissions import (
     AdministratorPermissionRequiredMixin, event_permission_required,
 )
-from pretix.control.views.event import DecoupleMixin
-from pretix.control.views.organizer import OrganizerDetailViewMixin
-from pretix.helpers import OF_SELF
-from pretix.helpers.http import redirect_to_url
-from pretix.helpers.stripe_utils import (
+from eventyay.control.views.event import DecoupleMixin
+from eventyay.control.views.organizer import OrganizerDetailViewMixin
+from eventyay.helpers import OF_SELF
+from eventyay.helpers.http import redirect_to_url
+from eventyay.helpers.stripe_utils import (
     get_stripe_secret_key, get_stripe_webhook_secret_key,
 )
-from pretix.multidomain.urlreverse import build_absolute_uri, eventreverse
+from eventyay.multidomain.urlreverse import build_absolute_uri, eventreverse
 
 from .forms import OrganizerStripeSettingsForm
 from .models import ReferencedStripeObject
@@ -315,10 +315,13 @@ def charge_webhook(event, event_json, charge_id, rso):
             prov = payment.payment_provider
             prov._init_api()
 
-        order.log_action('pretix.plugins.stripe.event', data=event_json)
+        order.log_action('eventyay.plugins.stripe.event', data=event_json)
 
-        is_refund = charge['amount_refunded'] or charge['refunds']['total_count'] or charge['dispute']
-        if is_refund:
+        if (
+            is_refund := charge['amount_refunded']
+            or charge['refunds']['total_count']
+            or charge['dispute']
+        ):
             known_refunds = [r.info_data.get('id') for r in payment.refunds.all()]
             migrated_refund_amounts = [r.amount for r in payment.refunds.all() if not r.info_data.get('id')]
             for r in charge['refunds']['data']:
@@ -418,7 +421,7 @@ def source_webhook(event, event_json, source_id, rso):
             prov = payment.payment_provider
             prov._init_api()
 
-        order.log_action('pretix.plugins.stripe.event', data=event_json)
+        order.log_action('eventyay.plugins.stripe.event', data=event_json)
         go = (event_json['type'] == 'source.chargeable' and
               payment.state in (OrderPayment.PAYMENT_STATE_PENDING, OrderPayment.PAYMENT_STATE_CREATED) and
               src.status == 'chargeable')
@@ -707,7 +710,7 @@ class OrganizerSettingsFormView(
             form.save()
             if form.has_changed():
                 self.request.organizer.log_action(
-                    'pretix.organizer.settings', user=self.request.user, data={
+                    'eventyay.organizer.settings', user=self.request.user, data={
                         k: form.cleaned_data.get(k) for k in form.changed_data
                     }
                 )
