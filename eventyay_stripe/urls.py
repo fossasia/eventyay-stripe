@@ -21,7 +21,7 @@ event_patterns = [
 urlpatterns = [
     re_path(r'^control/event/(?P<organizer>[^/]+)/(?P<event>[^/]+)/stripe/disconnect/$', oauth_disconnect,
             name='oauth.disconnect'),
-    re_path(r'^control/organizer/(?P<organizer>[^/]+)/stripeconnect/$', OrganizerSettingsFormView.as_view(),
+    re_path(r'^common/organizer/(?P<organizer>[^/]+)/stripeconnect/$', OrganizerSettingsFormView.as_view(),
             name='settings.connect'),
     re_path(r'^_stripe/webhook/$', webhook, name='webhook'),
     re_path(r'^_stripe/oauth_return/$', oauth_return, name='oauth.return'),
