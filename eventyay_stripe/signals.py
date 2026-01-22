@@ -156,7 +156,7 @@ def nav_o(sender, request, organizer, **kwargs):
             'url': reverse('plugins:eventyay_stripe:settings.connect', kwargs={
                 'organizer': request.organizer.slug
             }),
-            'parent': reverse('control:organizer.edit', kwargs={
+            'parent': reverse('eventyay_common:organizer.edit', kwargs={
                 'organizer': request.organizer.slug
             }),
             'active': 'settings.connect' in url.url_name,
