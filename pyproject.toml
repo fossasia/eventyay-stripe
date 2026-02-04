@@ -1,16 +1,16 @@
 [project]
 name = "eventyay-stripe"
 dynamic = ["version"]
-description = "Integrates pretix with venueless.org"
+description = "Integrates eventyay-stripe with eventyay"
 readme = "README.rst"
 requires-python = ">=3.9"
 license = {file = "LICENSE"}
 keywords = ["pretix"]
 authors = [
-    {name = "pretix team", email = "support@pretix.eu"},
+    {name = "eventyay team", email = "support@eventyay.com"},
 ]
 maintainers = [
-    {name = "pretix team", email = "support@pretix.eu"},
+    {name = "eventyay team", email = "support@eventyay.com"},
 ]
 
 dependencies = [
