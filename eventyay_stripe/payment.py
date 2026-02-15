@@ -91,7 +91,7 @@ class StripeSettingsHolder(BasePaymentProvider):
                 ).format(
                     _(
                         "To accept payments via Stripe, you will need an account at Stripe. By clicking on the "
-                        "following button, you can either create a new Stripe account connect eventyay to an existing "
+                        "following button, you can either create a new Stripe account or connect to an existing "
                         "one."
                     ),
                     self.get_connect_url(request),
