@@ -46,11 +46,9 @@ def html_head_presale(sender, request=None, **kwargs):
         template = get_template('plugins/stripe/presale_head.html')
         ctx = {
             'event': sender,
-            'settings': provider.settings,
-            'testmode': (
-                (provider.settings.get('endpoint', 'live') == 'test' or sender.testmode)
-                and provider.settings.publishable_test_key
-            )
+            'stripe_publishable_key': provider.checkout_publishable_key,
+            'stripe_connected_account_id': provider.checkout_connected_account_id,
+            'stripe_merchant_country': provider.settings.merchant_country,
         }
         return template.render(ctx)
     else:

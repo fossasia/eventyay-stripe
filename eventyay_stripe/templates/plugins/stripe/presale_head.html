@@ -8,12 +8,8 @@
 {% compress css %}
     <link type="text/css" rel="stylesheet" href="{% static 'plugins/stripe/eventyay-stripe.css' %}">
 {% endcompress %}
-{% if testmode %}
-    <script type="text/plain" id="stripe_pubkey">{{ settings.publishable_test_key }}</script>
-{% else %}
-    <script type="text/plain" id="stripe_pubkey">{{ settings.publishable_key }}</script>
+<script type="text/plain" id="stripe_pubkey">{{ stripe_publishable_key|default:"" }}</script>
+{% if stripe_connected_account_id %}
+    <script type="text/plain" id="stripe_connectedAccountId">{{ stripe_connected_account_id }}</script>
 {% endif %}
-{% if settings.connect_user_id and not settings.secret_key %}
-    <script type="text/plain" id="stripe_connectedAccountId">{{ settings.connect_user_id }}</script>
-{% endif %}
-    <script type="text/plain" id="stripe_merchantcountry">{{ settings.merchant_country|default:"" }}</script>
+    <script type="text/plain" id="stripe_merchantcountry">{{ stripe_merchant_country|default:"" }}</script>

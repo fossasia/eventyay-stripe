@@ -53,6 +53,44 @@ from .validation_models import (
 logger = logging.getLogger(__name__)
 
 
+def _uses_stripe_connect(event_settings) -> bool:
+    return bool(
+        event_settings.connect_client_id
+        and event_settings.connect_user_id
+        and not event_settings.secret_key
+    )
+
+
+def _requested_stripe_testmode(event: Event, event_settings) -> bool:
+    return bool(event_settings.get('endpoint', 'live') == 'test' or event.testmode)
+
+
+def _stripe_live_publishable_key(event_settings) -> str:
+    if _uses_stripe_connect(event_settings):
+        return event_settings.connect_publishable_key or event_settings.publishable_key or ''
+    return event_settings.publishable_key or ''
+
+
+def _stripe_test_publishable_key(event_settings) -> str:
+    if _uses_stripe_connect(event_settings):
+        return event_settings.connect_test_publishable_key or event_settings.publishable_test_key or ''
+    return event_settings.publishable_test_key or ''
+
+
+def _stripe_checkout_publishable_key(event: Event, event_settings) -> str:
+    if _requested_stripe_testmode(event, event_settings):
+        test_key = _stripe_test_publishable_key(event_settings)
+        if test_key:
+            return test_key
+    return _stripe_live_publishable_key(event_settings)
+
+
+def _stripe_provider_testmode(event: Event, event_settings) -> bool:
+    if _uses_stripe_connect(event_settings):
+        return _requested_stripe_testmode(event, event_settings)
+    return bool(event_settings.secret_key and '_test_' in event_settings.secret_key)
+
+
 class StripeSettingsHolder(BasePaymentProvider):
     """Manage Stripe provider settings"""
     identifier = "stripe_settings"
@@ -63,6 +101,16 @@ class StripeSettingsHolder(BasePaymentProvider):
     def __init__(self, event: Event):
         super().__init__(event)
         self.settings = SettingsSandbox("payment", "stripe", event)
+
+    @property
+    def checkout_publishable_key(self) -> str:
+        return _stripe_checkout_publishable_key(self.event, self.settings)
+
+    @property
+    def checkout_connected_account_id(self) -> str:
+        if _uses_stripe_connect(self.settings):
+            return self.settings.connect_user_id or ''
+        return ''
 
     def get_connect_url(self, request):
         """
@@ -520,12 +568,7 @@ class StripeMethod(BasePaymentProvider):
 
     @property
     def test_mode_message(self):
-        if self.settings.connect_client_id and not self.settings.secret_key:
-            is_testmode = True
-        else:
-            is_testmode = (
-                self.settings.secret_key and "_test_" in self.settings.secret_key
-            )
+        is_testmode = _stripe_provider_testmode(self.event, self.settings)
         if is_testmode:
             return mark_safe(
                 _(
@@ -2057,12 +2100,7 @@ class StripeKlarna(Redirector):
         return template.render(ctx)
 
     def test_mode_message(self):
-        if self.settings.connect_client_id and not self.settings.secret_key:
-            is_testmode = True
-        else:
-            is_testmode = (
-                self.settings.secret_key and "_test_" in self.settings.secret_key
-            )
+        is_testmode = _stripe_provider_testmode(self.event, self.settings)
         if is_testmode:
             return mark_safe(
                 _(
