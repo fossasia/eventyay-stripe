@@ -40,6 +40,7 @@ from eventyay.multidomain.urlreverse import build_absolute_uri, eventreverse
 
 from .forms import OrganizerStripeSettingsForm
 from .models import ReferencedStripeObject
+from .operational_log import OUTCOME_FAILURE, OUTCOME_SUCCESS, log_operation
 from .payment import StripeCreditCard, StripeSettingsHolder
 from .tasks import get_domain_for_event, stripe_verify_domain
 
@@ -180,6 +181,7 @@ def webhook(request, *args, **kwargs):
         payload = request.body
         if not payload:
             logger.exception("Empty payload on webhook")
+            log_operation("webhook.inbound", OUTCOME_FAILURE, backend="stripe", payment_provider="stripe", error_code="empty_payload", status=400)
             return HttpResponse("Empty payload", status=HTTPStatus.BAD_REQUEST)
         event_json = json.loads(payload.decode("utf-8"))
         sig_header = request.META.get("HTTP_STRIPE_SIGNATURE")
@@ -190,14 +192,16 @@ def webhook(request, *args, **kwargs):
     except AttributeError as e:
         logger.exception("Attribute Error on webhook: %s", e)
         return HttpResponse("Cannot verify Stripe signature", status=HTTPStatus.BAD_REQUEST)
-    except (json.decoder.JSONDecodeError, ValueError) as e:
-        # Invalid payload
-        logger.exception("Invalid payload on webhook: %s", e)
+    except (json.decoder.JSONDecodeError, ValueError):
+        logger.exception("Invalid payload on webhook")
+        log_operation("webhook.inbound", OUTCOME_FAILURE, backend="stripe", payment_provider="stripe", error_code="invalid_payload", status=400)
         return HttpResponse("Invalid payload", status=HTTPStatus.BAD_REQUEST)
-    except stripe.error.SignatureVerificationError as e:
-        # Invalid signature
-        logger.exception("Stripe error on webhook: %s", e)
+    except stripe.error.SignatureVerificationError:
+        logger.exception("Stripe webhook signature verification failed")
+        log_operation("webhook.inbound", OUTCOME_FAILURE, backend="stripe", payment_provider="stripe", error_code="signature_invalid", status=400)
         return HttpResponse("Invalid Stripe signature", status=HTTPStatus.BAD_REQUEST)
+
+    log_operation("webhook.inbound", OUTCOME_SUCCESS, backend="stripe", payment_provider="stripe", status=200)
 
     obj = event_json["data"]["object"]
     if (obj_type := obj["object"]) == "charge":
