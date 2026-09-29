@@ -8,6 +8,7 @@ from eventyay.celery_app import app
 from eventyay.multidomain.urlreverse import get_event_domain
 
 from .models import RegisteredApplePayDomain
+from .operational_log import OUTCOME_FAILURE, OUTCOME_SUCCESS, log_operation
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,8 @@ def stripe_verify_domain(event, domain):
         resp = stripe.ApplePayDomain.create(domain_name=domain, **api_config)
     except stripe.error.StripeError:
         logger.exception("Could not verify domain with Stripe")
+        log_operation("connection.request", OUTCOME_FAILURE, backend="stripe", payment_provider="stripe", error_code="stripe_error", event_id=event.pk)
     else:
+        log_operation("connection.request", OUTCOME_SUCCESS, backend="stripe", payment_provider="stripe", status=200, event_id=event.pk)
         if resp.livemode:
             RegisteredApplePayDomain.objects.create(domain=domain, account=account)
