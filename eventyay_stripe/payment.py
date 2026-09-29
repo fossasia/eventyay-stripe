@@ -47,7 +47,7 @@ from pydantic import ValidationError
 
 from . import __version__
 from .models import ReferencedStripeObject, RegisteredApplePayDomain
-from .operational_log import OUTCOME_FAILURE, log_operation
+from .operational_log import OUTCOME_FAILURE, OUTCOME_SUCCESS, log_operation
 from .tasks import get_stripe_account_key, stripe_verify_domain
 from .utils import shredded_stripe_payment_info
 from .validation_models import (
@@ -909,6 +909,15 @@ class StripeMethod(BasePaymentProvider):
         except stripe.error.StripeError as e:
             self.error_handler.handle_stripe_error(e, payment)
         else:
+            if intent is not None:
+                log_operation(
+                    "payment.charge",
+                    OUTCOME_SUCCESS,
+                    backend="stripe",
+                    payment_provider="stripe",
+                    event_id=payment.order.event_id,
+                    order_id=payment.order_id,
+                )
             # stripe update: change source to intent
             ReferencedStripeObject.objects.get_or_create(
                 reference=intent.id,
@@ -1236,6 +1245,15 @@ class StripeCreditCard(StripeMethod):
             self.error_handler.handle_stripe_error(e, payment)
 
         else:
+            if intent is not None:
+                log_operation(
+                    "payment.charge",
+                    OUTCOME_SUCCESS,
+                    backend="stripe",
+                    payment_provider="stripe",
+                    event_id=payment.order.event_id,
+                    order_id=payment.order_id,
+                )
             ReferencedStripeObject.objects.get_or_create(
                 reference=intent.id, defaults={"order": payment.order, "payment": payment}
             )
