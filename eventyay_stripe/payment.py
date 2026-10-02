@@ -47,6 +47,7 @@ from pydantic import ValidationError
 
 from . import __version__
 from .models import ReferencedStripeObject, RegisteredApplePayDomain
+from .operational_log import OUTCOME_FAILURE, OUTCOME_SUCCESS, log_operation
 from .tasks import get_stripe_account_key, stripe_verify_domain
 from .utils import shredded_stripe_payment_info
 from .validation_models import (
@@ -500,13 +501,33 @@ class StripeSettingsHolder(BasePaymentProvider):
 class StripeErrorHandlerMixin:
     def handle_card_error(self, e, payment):
         err = e.json_body["error"] if e.json_body else {"message": str(e)}
-        logger.exception("Stripe error: %s", err)
+        code = err.get("code") if isinstance(err, dict) else None
+        log_operation(
+            "payment.charge",
+            OUTCOME_FAILURE,
+            backend="stripe",
+            payment_provider="stripe",
+            error_code=code or "card_error",
+            event_id=payment.order.event_id,
+            order_id=payment.order_id,
+        )
+        logger.exception("Stripe card error")
         payment.fail(info={"error": True, "message": err["message"]})
         raise PaymentException(_("Stripe reported an error: %s") % err["message"])
 
     def handle_stripe_error(self, e, payment):
         err = e.json_body.get("error", {"message": str(e)}) if e.json_body else {"message": str(e)}
-        logger.exception("Stripe error: %s", err)
+        code = err.get("code") if isinstance(err, dict) else None
+        log_operation(
+            "payment.charge",
+            OUTCOME_FAILURE,
+            backend="stripe",
+            payment_provider="stripe",
+            error_code=code or "stripe_error",
+            event_id=payment.order.event_id,
+            order_id=payment.order_id,
+        )
+        logger.exception("Stripe error")
         if err.get("code") != "idempotency_key_in_use":
             payment.fail(info={"error": True, "message": err["message"]})
             raise PaymentException(
@@ -888,6 +909,15 @@ class StripeMethod(BasePaymentProvider):
         except stripe.error.StripeError as e:
             self.error_handler.handle_stripe_error(e, payment)
         else:
+            if intent is not None:
+                log_operation(
+                    "payment.charge",
+                    OUTCOME_SUCCESS,
+                    backend="stripe",
+                    payment_provider="stripe",
+                    event_id=payment.order.event_id,
+                    order_id=payment.order_id,
+                )
             # stripe update: change source to intent
             ReferencedStripeObject.objects.get_or_create(
                 reference=intent.id,
@@ -1215,6 +1245,15 @@ class StripeCreditCard(StripeMethod):
             self.error_handler.handle_stripe_error(e, payment)
 
         else:
+            if intent is not None:
+                log_operation(
+                    "payment.charge",
+                    OUTCOME_SUCCESS,
+                    backend="stripe",
+                    payment_provider="stripe",
+                    event_id=payment.order.event_id,
+                    order_id=payment.order_id,
+                )
             ReferencedStripeObject.objects.get_or_create(
                 reference=intent.id, defaults={"order": payment.order, "payment": payment}
             )
