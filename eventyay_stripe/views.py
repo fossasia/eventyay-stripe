@@ -18,7 +18,7 @@ from django.views import View
 from django.views.decorators.clickjacking import xframe_options_exempt
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_POST
-from django.views.generic import FormView
+from django.views.generic import TemplateView
 from django_scopes import scopes_disabled
 from eventyay.base.models import Event, Order, OrderPayment, Organizer, Quota
 from eventyay.base.payment import PaymentException
@@ -38,7 +38,6 @@ from eventyay.helpers.stripe_utils import (
 )
 from eventyay.multidomain.urlreverse import build_absolute_uri, eventreverse
 
-from .forms import OrganizerStripeSettingsForm
 from .models import ReferencedStripeObject
 from .payment import StripeCreditCard, StripeSettingsHolder
 from .tasks import get_domain_for_event, stripe_verify_domain
@@ -709,39 +708,8 @@ class ScaReturnView(StripeOrderView, View):
 
 
 class OrganizerSettingsFormView(
-    DecoupleMixin, OrganizerDetailViewMixin, AdministratorPermissionRequiredMixin, FormView
+    DecoupleMixin, OrganizerDetailViewMixin, AdministratorPermissionRequiredMixin, TemplateView
 ):
     model = Organizer
     permission = "can_change_organizer_settings"
-    form_class = OrganizerStripeSettingsForm
     template_name = "plugins/stripe/organizer_stripe.html"
-
-    def get_success_url(self):
-        return reverse(
-            "plugins:eventyay_stripe:settings.connect",
-            kwargs={
-                "organizer": self.request.organizer.slug,
-            },
-        )
-
-    def get_form_kwargs(self):
-        kwargs = super().get_form_kwargs()
-        kwargs["obj"] = self.request.organizer
-        return kwargs
-
-    @transaction.atomic
-    def post(self, request, *args, **kwargs):
-        form = self.get_form()
-        if form.is_valid():
-            form.save()
-            if form.has_changed():
-                self.request.organizer.log_action(
-                    "eventyay.organizer.settings",
-                    user=self.request.user,
-                    data={k: form.cleaned_data.get(k) for k in form.changed_data},
-                )
-            messages.success(self.request, _("Your changes have been saved."))
-            return redirect_to_url(self.get_success_url())
-        else:
-            messages.error(self.request, _("We could not save your changes. See below for details."))
-            return self.get(request)

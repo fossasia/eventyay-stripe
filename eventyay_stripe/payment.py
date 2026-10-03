@@ -5,15 +5,17 @@ import re
 import urllib.parse
 from collections import OrderedDict
 from decimal import Decimal
+from importlib import import_module
 from urllib.parse import urlencode
 
 import stripe
 from django import forms
+from django.apps import apps
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.gis.geoip2 import GeoIP2
 from django.core import signing
-from django.db import transaction
+from django.db import DatabaseError, transaction
 from django.http import HttpRequest
 from django.template.loader import get_template
 from django.urls import reverse
@@ -23,6 +25,7 @@ from django.utils.timezone import now
 from django.utils.translation import gettext, pgettext
 from django.utils.translation import gettext_lazy as _
 from django_countries.fields import Country
+from django_scopes import scope
 from eventyay.base.decimal import round_decimal
 from eventyay.base.forms.questions import guess_country
 from eventyay.base.models import (
@@ -643,21 +646,59 @@ class StripeMethod(BasePaymentProvider):
     def _prepare_api_connect_args(self, payment):
         d = {}
         if _uses_stripe_connect(self.settings):
-            fee = Decimal("0.00")
-            if self.settings.get("connect_app_fee_percent", as_type=Decimal):
-                fee = round_decimal(
-                    self.settings.get("connect_app_fee_percent", as_type=Decimal) * payment.amount / Decimal("100.00"),
-                    self.event.currency,
-                )
-            if self.settings.connect_app_fee_max:
-                fee = min(fee, self.settings.get("connect_app_fee_max", as_type=Decimal))
-            if self.settings.get("connect_app_fee_min", as_type=Decimal):
-                fee = max(fee, self.settings.get("connect_app_fee_min", as_type=Decimal))
+            fee = self._business_platform_fee(payment)
             if fee:
                 d["application_fee_amount"] = self._decimal_to_int(fee)
         if self.settings.connect_destination:
             d["transfer_data"] = {"destination": self.settings.connect_destination}
         return d
+
+    def _business_platform_fee(self, payment) -> Decimal:
+        if not apps.is_installed("eventyay_business") or payment.amount <= 0:
+            return Decimal("0.00")
+
+        try:
+            subscription_model = apps.get_model("eventyay_business", "Subscription")
+            payment_date = now()
+            subscription = (
+                subscription_model.objects.filter(
+                    organizer=self.event.organizer,
+                    status="active",
+                    starts_at__lte=payment_date,
+                )
+                .exclude(ends_at__lt=payment_date)
+                .select_related("tier_version")
+                .first()
+            )
+            resolve_fee_settings = import_module("eventyay_business.services").resolve_fee_settings
+            fee_percent, max_fee, _is_override = resolve_fee_settings(
+                event=self.event,
+                order=payment.order,
+                tier_version=subscription.tier_version if subscription else None,
+            )
+        except (ImportError, AttributeError, LookupError, ValueError, TypeError, ArithmeticError, DatabaseError) as exc:
+            logger.exception("Unable to resolve Business fee settings")
+            raise PaymentException(_("Unable to determine the payment fee.")) from exc
+        if fee_percent <= 0:
+            return Decimal("0.00")
+
+        with scope(event=self.event):
+            fee_base = sum(
+                (
+                    position.price - (position.tax_value or Decimal("0.00"))
+                    for position in payment.order.positions.all()
+                ),
+                Decimal("0.00"),
+            )
+        if fee_base <= 0 or payment.order.total <= 0:
+            return Decimal("0.00")
+
+        full_fee = fee_base * fee_percent / Decimal("100.00")
+        if max_fee > 0:
+            full_fee = min(full_fee, max_fee)
+        payment_share = min(payment.amount / payment.order.total, Decimal("1.00"))
+        fee = round_decimal(full_fee * payment_share, self.event.currency)
+        return min(fee, payment.amount)
 
     def statement_descriptor(self, payment, length=22):
         return "{event}-{code} {eventname}".format(
