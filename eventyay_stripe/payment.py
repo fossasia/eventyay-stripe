@@ -13,7 +13,7 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.gis.geoip2 import GeoIP2
 from django.core import signing
-from django.db import DatabaseError, transaction
+from django.db import transaction
 from django.http import HttpRequest
 from django.template.loader import get_template
 from django.urls import reverse
@@ -23,8 +23,6 @@ from django.utils.timezone import now
 from django.utils.translation import gettext, pgettext
 from django.utils.translation import gettext_lazy as _
 from django_countries.fields import Country
-from django_scopes import scope
-from eventyay.base.decimal import round_decimal
 from eventyay.base.forms.questions import guess_country
 from eventyay.base.models import (
     Event,
@@ -45,12 +43,6 @@ from eventyay.multidomain.urlreverse import build_absolute_uri
 from eventyay.presale.views.cart import cart_session
 from geoip2.errors import AddressNotFoundError
 from pydantic import ValidationError
-
-try:
-    from eventyay.base.platform_fees import MultiplePlatformFeePoliciesError, resolve_platform_fee_policy
-except ImportError:
-    MultiplePlatformFeePoliciesError = RuntimeError
-    resolve_platform_fee_policy = None
 
 from . import __version__
 from .models import ReferencedStripeObject, RegisteredApplePayDomain
@@ -636,10 +628,6 @@ class StripeMethod(BasePaymentProvider):
     def payment_prepare(self, request, payment):
         return self.checkout_prepare(request, None)
 
-    def _amount_to_decimal(self, cents):
-        places = settings.CURRENCY_PLACES.get(self.event.currency, 2)
-        return round_decimal(float(cents) / (10**places), self.event.currency)
-
     def _decimal_to_int(self, amount):
         places = settings.CURRENCY_PLACES.get(self.event.currency, 2)
         return int(amount * 10**places)
@@ -649,67 +637,9 @@ class StripeMethod(BasePaymentProvider):
 
     def _prepare_api_connect_args(self, payment):
         d = {}
-        if _uses_stripe_connect(self.settings):
-            fee = self._platform_fee(payment)
-            if fee:
-                d["application_fee_amount"] = self._decimal_to_int(fee)
         if self.settings.connect_destination:
             d["transfer_data"] = {"destination": self.settings.connect_destination}
         return d
-
-    def _platform_fee(self, payment) -> Decimal:
-        if resolve_platform_fee_policy is None or payment.amount <= 0:
-            return Decimal("0.00")
-
-        try:
-            policy = resolve_platform_fee_policy(
-                event=self.event,
-                order=payment.order,
-                payment=payment,
-            )
-            if policy.percentage <= 0:
-                return Decimal("0.00")
-
-            with scope(event=self.event):
-                fee_base = sum(
-                    (
-                        position.price - (position.tax_value or Decimal("0.00"))
-                        for position in payment.order.positions.all()
-                    ),
-                    Decimal("0.00"),
-                )
-                prior_application_fees = sum(
-                    (
-                        self._amount_to_decimal(existing_payment.info_data.get("application_fee_amount") or 0)
-                        for existing_payment in payment.order.payments.filter(
-                            provider__startswith="stripe",
-                            state=OrderPayment.PAYMENT_STATE_CONFIRMED,
-                        ).exclude(pk=payment.pk)
-                    ),
-                    Decimal("0.00"),
-                )
-        except (
-            ImportError,
-            AttributeError,
-            LookupError,
-            ValueError,
-            TypeError,
-            ArithmeticError,
-            DatabaseError,
-            MultiplePlatformFeePoliciesError,
-        ) as exc:
-            logger.exception("Unable to resolve platform fee policy")
-            raise PaymentException(_("Unable to determine the payment fee.")) from exc
-        if fee_base <= 0 or payment.order.total <= 0:
-            return Decimal("0.00")
-
-        full_fee = fee_base * policy.percentage / Decimal("100.00")
-        if policy.maximum_fee > 0:
-            full_fee = min(full_fee, policy.maximum_fee)
-        payment_share = min(payment.amount / payment.order.total, Decimal("1.00"))
-        remaining_fee = max(full_fee - prior_application_fees, Decimal("0.00"))
-        fee = min(round_decimal(full_fee * payment_share, self.event.currency), remaining_fee)
-        return min(fee, payment.amount)
 
     def statement_descriptor(self, payment, length=22):
         return "{event}-{code} {eventname}".format(
