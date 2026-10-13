@@ -6,68 +6,43 @@ import pytest
 from django.db import DatabaseError
 from eventyay.base.payment import PaymentException
 
-from eventyay_stripe.payment import StripeMethod
+from eventyay_stripe.payment import MultiplePlatformFeePoliciesError, StripeMethod
 
 
 @pytest.mark.parametrize("error", [ImportError("missing service"), ValueError("invalid fee")])
-def test_business_fee_resolution_failure_is_payment_error(error):
+def test_platform_fee_resolution_failure_is_payment_error(error):
     method = StripeMethod.__new__(StripeMethod)
     method.event = SimpleNamespace(organizer=object())
     payment = SimpleNamespace(amount=Decimal("10.00"), order=object())
-    subscription_model = MagicMock()
-    subscription_model.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = None
-
-    with (
-        patch("eventyay_stripe.payment.apps.is_installed", return_value=True),
-        patch("eventyay_stripe.payment.apps.get_model", return_value=subscription_model),
-        patch("eventyay_stripe.payment.import_module") as import_module,
-    ):
-        if isinstance(error, ImportError):
-            import_module.side_effect = error
-        else:
-            import_module.return_value.resolve_fee_settings.side_effect = error
+    with patch("eventyay_stripe.payment.resolve_platform_fee_policy", side_effect=error):
         with pytest.raises(PaymentException) as exc_info:
-            method._business_platform_fee(payment)
+            method._platform_fee(payment)
 
     assert exc_info.value.__cause__ is error
 
 
-def test_missing_business_subscription_model_is_payment_error():
+def test_conflicting_platform_fee_policies_are_payment_error():
     method = StripeMethod.__new__(StripeMethod)
     method.event = SimpleNamespace(organizer=object())
     payment = SimpleNamespace(amount=Decimal("10.00"), order=object())
-    error = LookupError("missing Subscription model")
+    error = MultiplePlatformFeePoliciesError("multiple platform fee policies")
 
-    with (
-        patch("eventyay_stripe.payment.apps.is_installed", return_value=True),
-        patch("eventyay_stripe.payment.apps.get_model", side_effect=error),
-    ):
+    with patch("eventyay_stripe.payment.resolve_platform_fee_policy", side_effect=error):
         with pytest.raises(PaymentException) as exc_info:
-            method._business_platform_fee(payment)
+            method._platform_fee(payment)
 
     assert exc_info.value.__cause__ is error
 
 
-def test_business_fee_position_lookup_failure_is_payment_error():
+def test_platform_fee_position_lookup_failure_is_payment_error():
     method = StripeMethod.__new__(StripeMethod)
     method.event = SimpleNamespace(organizer=object())
     error = DatabaseError("position lookup failed")
     payment = MagicMock(amount=Decimal("10.00"))
     payment.order.positions.all.side_effect = error
-    subscription_model = MagicMock()
-    subscription_model.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = None
-
-    with (
-        patch("eventyay_stripe.payment.apps.is_installed", return_value=True),
-        patch("eventyay_stripe.payment.apps.get_model", return_value=subscription_model),
-        patch(
-            "eventyay_stripe.payment.import_module",
-            return_value=SimpleNamespace(
-                resolve_fee_settings=MagicMock(return_value=(Decimal("10.00"), Decimal("1.00"), False))
-            ),
-        ),
-    ):
+    policy = SimpleNamespace(percentage=Decimal("10.00"), maximum_fee=Decimal("1.00"))
+    with patch("eventyay_stripe.payment.resolve_platform_fee_policy", return_value=policy):
         with pytest.raises(PaymentException) as exc_info:
-            method._business_platform_fee(payment)
+            method._platform_fee(payment)
 
     assert exc_info.value.__cause__ is error

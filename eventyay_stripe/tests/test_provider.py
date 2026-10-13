@@ -138,7 +138,7 @@ def test_statement_descriptor_uses_sanitized_event_name(env):
 
 
 @pytest.mark.django_db
-def test_connect_fee_is_zero_without_business_plugin(env):
+def test_connect_fee_is_zero_without_platform_fee_resolver(env):
     event, order = env
     event.settings.set("payment_stripe_connect_client_id", "ca_test")
     event.settings.set("payment_stripe_connect_user_id", "acct_test")
@@ -146,7 +146,20 @@ def test_connect_fee_is_zero_without_business_plugin(env):
     provider = StripeCreditCard(event)
     payment = order.payments.create(provider="stripe_cc", amount=order.total)
 
-    with patch("eventyay_stripe.payment.apps.is_installed", return_value=False):
+    with patch("eventyay_stripe.payment.resolve_platform_fee_policy", None):
+        assert "application_fee_amount" not in provider._prepare_api_connect_args(payment)
+
+
+@pytest.mark.django_db
+def test_connect_fee_is_zero_for_zero_fee_policy(env):
+    event, order = env
+    event.settings.set("payment_stripe_connect_client_id", "ca_test")
+    event.settings.set("payment_stripe_connect_user_id", "acct_test")
+    provider = StripeCreditCard(event)
+    payment = order.payments.create(provider="stripe_cc", amount=order.total)
+
+    policy = SimpleNamespace(percentage=Decimal("0.00"), maximum_fee=Decimal("0.00"))
+    with patch("eventyay_stripe.payment.resolve_platform_fee_policy", return_value=policy):
         assert "application_fee_amount" not in provider._prepare_api_connect_args(payment)
 
 
@@ -162,23 +175,17 @@ def test_connect_fee_uses_business_rate_and_cap(env):
         SimpleNamespace(price=Decimal("18.00"), tax_value=Decimal("2.00")),
         SimpleNamespace(price=Decimal("2.00"), tax_value=None),
     ]
-    subscription_model = MagicMock()
-    subscription_model.objects.filter.return_value.exclude.return_value.select_related.return_value.first.return_value = SimpleNamespace(
-        tier_version=object()
-    )
-    resolve_fee_settings = MagicMock(return_value=(Decimal("10.00"), Decimal("1.00"), True))
+    policy = SimpleNamespace(percentage=Decimal("10.00"), maximum_fee=Decimal("1.00"))
+    resolve_platform_fee_policy = MagicMock(return_value=policy)
 
-    with (
-        patch("eventyay_stripe.payment.apps.is_installed", return_value=True),
-        patch("eventyay_stripe.payment.apps.get_model", return_value=subscription_model),
-        patch(
-            "eventyay_stripe.payment.import_module",
-            return_value=SimpleNamespace(resolve_fee_settings=resolve_fee_settings),
-        ),
-    ):
+    with patch("eventyay_stripe.payment.resolve_platform_fee_policy", resolve_platform_fee_policy):
         assert provider._prepare_api_connect_args(payment)["application_fee_amount"] == 50
 
-    resolve_fee_settings.assert_called_once()
+    resolve_platform_fee_policy.assert_called_once_with(
+        event=event,
+        order=payment.order,
+        payment=payment,
+    )
 
 
 @pytest.mark.django_db

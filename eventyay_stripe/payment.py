@@ -5,12 +5,10 @@ import re
 import urllib.parse
 from collections import OrderedDict
 from decimal import Decimal
-from importlib import import_module
 from urllib.parse import urlencode
 
 import stripe
 from django import forms
-from django.apps import apps
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.gis.geoip2 import GeoIP2
@@ -47,6 +45,12 @@ from eventyay.multidomain.urlreverse import build_absolute_uri
 from eventyay.presale.views.cart import cart_session
 from geoip2.errors import AddressNotFoundError
 from pydantic import ValidationError
+
+try:
+    from eventyay.base.platform_fees import MultiplePlatformFeePoliciesError, resolve_platform_fee_policy
+except ImportError:
+    MultiplePlatformFeePoliciesError = RuntimeError
+    resolve_platform_fee_policy = None
 
 from . import __version__
 from .models import ReferencedStripeObject, RegisteredApplePayDomain
@@ -646,37 +650,24 @@ class StripeMethod(BasePaymentProvider):
     def _prepare_api_connect_args(self, payment):
         d = {}
         if _uses_stripe_connect(self.settings):
-            fee = self._business_platform_fee(payment)
+            fee = self._platform_fee(payment)
             if fee:
                 d["application_fee_amount"] = self._decimal_to_int(fee)
         if self.settings.connect_destination:
             d["transfer_data"] = {"destination": self.settings.connect_destination}
         return d
 
-    def _business_platform_fee(self, payment) -> Decimal:
-        if not apps.is_installed("eventyay_business") or payment.amount <= 0:
+    def _platform_fee(self, payment) -> Decimal:
+        if resolve_platform_fee_policy is None or payment.amount <= 0:
             return Decimal("0.00")
 
         try:
-            subscription_model = apps.get_model("eventyay_business", "Subscription")
-            payment_date = now()
-            subscription = (
-                subscription_model.objects.filter(
-                    organizer=self.event.organizer,
-                    status="active",
-                    starts_at__lte=payment_date,
-                )
-                .exclude(ends_at__lt=payment_date)
-                .select_related("tier_version")
-                .first()
-            )
-            resolve_fee_settings = import_module("eventyay_business.services").resolve_fee_settings
-            fee_percent, max_fee, _is_override = resolve_fee_settings(
+            policy = resolve_platform_fee_policy(
                 event=self.event,
                 order=payment.order,
-                tier_version=subscription.tier_version if subscription else None,
+                payment=payment,
             )
-            if fee_percent <= 0:
+            if policy.percentage <= 0:
                 return Decimal("0.00")
 
             with scope(event=self.event):
@@ -697,15 +688,24 @@ class StripeMethod(BasePaymentProvider):
                     ),
                     Decimal("0.00"),
                 )
-        except (ImportError, AttributeError, LookupError, ValueError, TypeError, ArithmeticError, DatabaseError) as exc:
-            logger.exception("Unable to resolve Business fee settings")
+        except (
+            ImportError,
+            AttributeError,
+            LookupError,
+            ValueError,
+            TypeError,
+            ArithmeticError,
+            DatabaseError,
+            MultiplePlatformFeePoliciesError,
+        ) as exc:
+            logger.exception("Unable to resolve platform fee policy")
             raise PaymentException(_("Unable to determine the payment fee.")) from exc
         if fee_base <= 0 or payment.order.total <= 0:
             return Decimal("0.00")
 
-        full_fee = fee_base * fee_percent / Decimal("100.00")
-        if max_fee > 0:
-            full_fee = min(full_fee, max_fee)
+        full_fee = fee_base * policy.percentage / Decimal("100.00")
+        if policy.maximum_fee > 0:
+            full_fee = min(full_fee, policy.maximum_fee)
         payment_share = min(payment.amount / payment.order.total, Decimal("1.00"))
         remaining_fee = max(full_fee - prior_application_fees, Decimal("0.00"))
         fee = min(round_decimal(full_fee * payment_share, self.event.currency), remaining_fee)
