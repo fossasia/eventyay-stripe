@@ -1,6 +1,5 @@
 from django import forms
 from django.utils.translation import gettext_lazy as _
-from eventyay.base.forms import SettingsForm
 
 
 class StripeKeyValidator:
@@ -22,18 +21,3 @@ class StripeKeyValidator:
                     "prefix": self._prefixes[0],
                 },
             )
-
-
-class OrganizerStripeSettingsForm(SettingsForm):
-    payment_stripe_connect_app_fee_percent = forms.DecimalField(
-        label=_("Stripe Connect: App fee (percent)"),
-        required=False,
-    )
-    payment_stripe_connect_app_fee_max = forms.DecimalField(
-        label=_("Stripe Connect: App fee (max)"),
-        required=False,
-    )
-    payment_stripe_connect_app_fee_min = forms.DecimalField(
-        label=_("Stripe Connect: App fee (min)"),
-        required=False,
-    )

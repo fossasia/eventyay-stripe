@@ -164,27 +164,6 @@ def register_global_settings(sender, **kwargs):
                     validators=(StripeKeyValidator("pk_test_"),),
                 ),
             ),
-            (
-                "payment_stripe_connect_app_fee_percent",
-                forms.DecimalField(
-                    label=_("Stripe Connect: App fee (percent)"),
-                    required=False,
-                ),
-            ),
-            (
-                "payment_stripe_connect_app_fee_max",
-                forms.DecimalField(
-                    label=_("Stripe Connect: App fee (max)"),
-                    required=False,
-                ),
-            ),
-            (
-                "payment_stripe_connect_app_fee_min",
-                forms.DecimalField(
-                    label=_("Stripe Connect: App fee (min)"),
-                    required=False,
-                ),
-            ),
         ]
     )
 
