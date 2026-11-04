@@ -19,6 +19,9 @@ class StripePluginApp(AppConfig):
         description = _("This plugin allows you to receive credit card payments " + "via Stripe.")
 
     def ready(self):
+        from .operational_log import log_plugin_loaded
+
+        log_plugin_loaded("stripe")
         from . import signals, tasks  # NOQA
 
 
