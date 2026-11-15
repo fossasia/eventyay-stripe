@@ -19,7 +19,7 @@ class Command(BaseCommand):
             self.stderr.write(self.style.ERROR("Stripe Connect is not set up!"))
             return
 
-        for e in Event.objects.filter(plugins__icontains="eventyay.plugins.stripe"):
+        for e in Event.objects.filter(plugins__icontains="eventyay_stripe"):
             uid = e.settings.payment_stripe_connect_user_id
             if uid and not e.settings.payment_stripe_merchant_country:
                 if uid in cache:
