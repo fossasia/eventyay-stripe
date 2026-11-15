@@ -60,8 +60,40 @@ def test_stripe_object_to_dict_keeps_plain_dicts_and_handles_none():
     assert stripe_object_to_dict(None) == {}
 
 
+class _ObjectWithoutDictMethods:
+    """Stand-in for a stripe-python 15 StripeObject: supports ``in``, ``[]`` and ``to_dict()`` but not ``.get()``."""
+
+    def __init__(self, data):
+        self._data = data
+
+    def __contains__(self, key):
+        return key in self._data
+
+    def __getitem__(self, key):
+        value = self._data[key]
+        return _ObjectWithoutDictMethods(value) if isinstance(value, dict) else value
+
+    def to_dict(self):
+        return self._data
+
+
+def test_stripe_object_to_dict_converts_objects_without_dict_methods():
+    account = stripe_object_to_dict(_ObjectWithoutDictMethods({"country": "DE", "settings": {"dashboard": {}}}))
+
+    assert account.get("country") == "DE"
+    assert account.get("settings", {}).get("dashboard") == {}
+
+
 def test_stripe_charge_source_type():
     assert stripe_charge_source_type(_stripe_object({"source": {"type": "sofort"}})) == "sofort"
     assert stripe_charge_source_type(_stripe_object({"source": {"object": "card"}})) == "card"
     assert stripe_charge_source_type(_stripe_object({"source": None})) == "card"
     assert stripe_charge_source_type(_stripe_object({})) == "card"
+
+
+def test_stripe_charge_source_type_uses_payment_method_details_without_source():
+    charge = {"source": None, "payment_method_details": {"type": "ideal", "ideal": {"bank": "ing"}}}
+
+    assert stripe_charge_source_type(_stripe_object(charge)) == "ideal"
+    assert stripe_charge_source_type(_ObjectWithoutDictMethods(charge)) == "ideal"
+    assert stripe_charge_source_type(_ObjectWithoutDictMethods({"source": {"type": "sofort"}})) == "sofort"

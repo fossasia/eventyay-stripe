@@ -42,9 +42,16 @@ def stripe_object_to_dict(obj) -> dict:
 
 
 def stripe_charge_source_type(charge) -> str:
-    """Return the type of a charge's legacy source, defaulting to ``card`` when it has none."""
+    """Return the payment method type of a charge.
+
+    Read the legacy source when the charge has one, then the payment method details, and fall back to ``card``.
+    """
     source = stripe_object_to_dict(charge["source"] if "source" in charge else None)
-    return source.get("type", source.get("object", "card"))
+    source_type = source.get("type") or source.get("object")
+    if source_type:
+        return source_type
+    details = stripe_object_to_dict(charge["payment_method_details"] if "payment_method_details" in charge else None)
+    return details.get("type") or "card"
 
 
 def shredded_stripe_source(source) -> dict | None:
