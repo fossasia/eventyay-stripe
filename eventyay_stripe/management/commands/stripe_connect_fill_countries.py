@@ -4,6 +4,8 @@ from django_scopes import scopes_disabled
 from eventyay.base.models import Event
 from eventyay.base.settings import GlobalSettingsObject
 
+from ...utils import stripe_object_to_dict
+
 
 class Command(BaseCommand):
     help = "Detect country for Stripe Connect accounts connected with eventyay (required for payment request buttons)"
@@ -28,4 +30,5 @@ class Command(BaseCommand):
                     except Exception as e:
                         print(e)
                     else:
-                        e.settings.payment_stripe_merchant_country = cache[uid] = account.get("country")
+                        country = stripe_object_to_dict(account).get("country")
+                        e.settings.payment_stripe_merchant_country = cache[uid] = country

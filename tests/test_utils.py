@@ -1,8 +1,12 @@
 from decimal import Decimal
 
+import stripe
+
 from eventyay_stripe.utils import (
+    stripe_charge_source_type,
     stripe_decimal_to_int,
     stripe_key_is_valid,
+    stripe_object_to_dict,
     stripe_statement_descriptor,
     stripe_webhook_signature_header,
 )
@@ -33,3 +37,31 @@ def test_stripe_webhook_signature_header_is_stable_for_a_timestamp():
     assert header.startswith("t=1,v1=")
     assert stripe_webhook_signature_header("{}", "whsec_123", timestamp=1) == header
     assert stripe_webhook_signature_header("{}", "whsec_other", timestamp=1) != header
+
+
+def _stripe_object(data):
+    return stripe.StripeObject.construct_from(data, "sk_test_dummy")
+
+
+def test_stripe_object_to_dict_supports_dict_methods_on_api_objects():
+    account = stripe_object_to_dict(
+        _stripe_object({"country": "DE", "settings": {"dashboard": {"display_name": "Mega Conf"}}})
+    )
+
+    assert account.get("country") == "DE"
+    assert account.get("email") is None
+    assert account.get("settings", {}).get("dashboard", {}).get("display_name") == "Mega Conf"
+
+
+def test_stripe_object_to_dict_keeps_plain_dicts_and_handles_none():
+    data = {"country": "DE"}
+
+    assert stripe_object_to_dict(data) is data
+    assert stripe_object_to_dict(None) == {}
+
+
+def test_stripe_charge_source_type():
+    assert stripe_charge_source_type(_stripe_object({"source": {"type": "sofort"}})) == "sofort"
+    assert stripe_charge_source_type(_stripe_object({"source": {"object": "card"}})) == "card"
+    assert stripe_charge_source_type(_stripe_object({"source": None})) == "card"
+    assert stripe_charge_source_type(_stripe_object({})) == "card"
