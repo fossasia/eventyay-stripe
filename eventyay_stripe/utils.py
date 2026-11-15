@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import re
 import time
+from decimal import Decimal
 
 
 def stripe_key_is_valid(value: str, prefixes: list[str]) -> bool:
@@ -18,6 +19,11 @@ def stripe_statement_descriptor(event_slug: str, order_code: str, event_name: ob
 def stripe_decimal_to_int(amount, places: int) -> int:
     """Convert a decimal amount to Stripe's integer minor units."""
     return int(amount * 10**places)
+
+
+def stripe_int_to_decimal(amount: int, places: int) -> Decimal:
+    """Convert an amount in Stripe's integer minor units to a decimal amount."""
+    return Decimal(amount) / 10**places
 
 
 def stripe_webhook_signature_header(payload: str, secret: str, timestamp: int | None = None) -> str:

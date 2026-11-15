@@ -2,6 +2,7 @@ from decimal import Decimal
 
 from eventyay_stripe.utils import (
     stripe_decimal_to_int,
+    stripe_int_to_decimal,
     stripe_key_is_valid,
     stripe_statement_descriptor,
     stripe_webhook_signature_header,
@@ -26,6 +27,13 @@ def test_stripe_statement_descriptor_sanitizes_and_truncates():
 def test_stripe_decimal_to_int_uses_currency_places():
     assert stripe_decimal_to_int(Decimal("13.37"), 2) == 1337
     assert stripe_decimal_to_int(Decimal("13"), 0) == 13
+
+
+def test_stripe_int_to_decimal_uses_currency_places():
+    assert stripe_int_to_decimal(1337, 2) == Decimal("13.37")
+    assert stripe_int_to_decimal(500, 2) == Decimal("5.00")
+    assert stripe_int_to_decimal(13, 0) == Decimal("13")
+    assert stripe_int_to_decimal(1337, 3) == Decimal("1.337")
 
 
 def test_stripe_webhook_signature_header_is_stable_for_a_timestamp():
