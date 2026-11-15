@@ -23,7 +23,6 @@ from django.utils.timezone import now
 from django.utils.translation import gettext, pgettext
 from django.utils.translation import gettext_lazy as _
 from django_countries.fields import Country
-from eventyay.base.decimal import round_decimal
 from eventyay.base.forms.questions import guess_country
 from eventyay.base.models import (
     Event,
@@ -629,10 +628,6 @@ class StripeMethod(BasePaymentProvider):
     def payment_prepare(self, request, payment):
         return self.checkout_prepare(request, None)
 
-    def _amount_to_decimal(self, cents):
-        places = settings.CURRENCY_PLACES.get(self.event.currency, 2)
-        return round_decimal(float(cents) / (10**places), self.event.currency)
-
     def _decimal_to_int(self, amount):
         places = settings.CURRENCY_PLACES.get(self.event.currency, 2)
         return int(amount * 10**places)
@@ -642,19 +637,6 @@ class StripeMethod(BasePaymentProvider):
 
     def _prepare_api_connect_args(self, payment):
         d = {}
-        if _uses_stripe_connect(self.settings):
-            fee = Decimal("0.00")
-            if self.settings.get("connect_app_fee_percent", as_type=Decimal):
-                fee = round_decimal(
-                    self.settings.get("connect_app_fee_percent", as_type=Decimal) * payment.amount / Decimal("100.00"),
-                    self.event.currency,
-                )
-            if self.settings.connect_app_fee_max:
-                fee = min(fee, self.settings.get("connect_app_fee_max", as_type=Decimal))
-            if self.settings.get("connect_app_fee_min", as_type=Decimal):
-                fee = max(fee, self.settings.get("connect_app_fee_min", as_type=Decimal))
-            if fee:
-                d["application_fee_amount"] = self._decimal_to_int(fee)
         if self.settings.connect_destination:
             d["transfer_data"] = {"destination": self.settings.connect_destination}
         return d
@@ -1025,13 +1007,18 @@ class StripeMethod(BasePaymentProvider):
             else:
                 chargeid = payment_info["id"]
 
+            refund_connect_args = {"reverse_transfer": True} if self.settings.connect_destination else {}
+            application_fee_amount = payment_info.get("application_fee_amount")
+            if isinstance(application_fee_amount, int) and application_fee_amount > 0:
+                refund_connect_args["refund_application_fee"] = True
+
             # stripe update: from Charge to Refund
             # doc: https://docs.stripe.com/api/refunds?lang=python
             r = stripe.Refund.create(
                 charge=chargeid,
                 amount=self._get_amount(refund),
                 **self.api_config,
-                **({"reverse_transfer": True} if self.settings.connect_destination else {}),
+                **refund_connect_args,
             )
         except (
             stripe.error.InvalidRequestError,

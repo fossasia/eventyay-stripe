@@ -8,6 +8,8 @@ if not os.environ.get("DJANGO_SETTINGS_MODULE"):
 
 from eventyay.base.models import Event, Organizer, Team, User
 
+from eventyay_stripe.signals import register_global_settings
+
 valid_secret_key_values = [
     "sk_",
     "sk_foo",
@@ -30,6 +32,18 @@ invalid_publishable_key_values = [
     "ihasnoprefix",
     "ihaspostfixpk_",
 ]
+
+
+def test_global_ticketing_fields_are_owned_by_stripe_plugin():
+    fields = register_global_settings(sender=None)
+    assert {
+        "payment_stripe_connect_client_id",
+        "payment_stripe_connect_publishable_key",
+        "payment_stripe_connect_secret_key",
+        "payment_stripe_connect_test_publishable_key",
+        "payment_stripe_connect_test_secret_key",
+    } <= set(fields)
+    assert "payment_stripe_connect_app_fee_percent" not in fields
 
 
 @pytest.fixture

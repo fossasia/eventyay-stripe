@@ -136,6 +136,18 @@ def test_statement_descriptor_uses_sanitized_event_name(env):
 
 
 @pytest.mark.django_db
+def test_connect_payment_does_not_collect_application_fee(env):
+    event, order = env
+    event.settings.set("payment_stripe_connect_client_id", "ca_test")
+    event.settings.set("payment_stripe_connect_user_id", "acct_test")
+    event.settings.set("payment_stripe_connect_app_fee_percent", "5.00")
+    provider = StripeCreditCard(event)
+    payment = order.payments.create(provider="stripe_cc", amount=order.total)
+
+    assert "application_fee_amount" not in provider._prepare_api_connect_args(payment)
+
+
+@pytest.mark.django_db
 def test_payment_intent_description_uses_raw_event_name(env, monkeypatch):
     event, order = env
     payment = order.payments.create(provider="stripe_cc", amount=order.total)
@@ -296,6 +308,7 @@ def test_refund_success(env, factory, monkeypatch):
     def refund_create(**kwargs):
         assert kwargs["charge"] == "ch_123345345"
         assert kwargs["amount"] == 1337
+        assert "refund_application_fee" not in kwargs
         r = Object()
         r.id = "re_foo"
         r.status = "succeeded"
@@ -312,6 +325,43 @@ def test_refund_success(env, factory, monkeypatch):
         payment=p,
     )
     prov.execute_refund(refund)
+    refund.refresh_from_db()
+    assert refund.state == OrderRefund.REFUND_STATE_DONE
+
+
+@pytest.mark.django_db
+def test_partial_refund_refunds_connect_application_fee(env, monkeypatch):
+    event, order = env
+    event.settings.set("payment_stripe_connect_client_id", "ca_test")
+    event.settings.set("payment_stripe_connect_user_id", "acct_test")
+
+    def refund_create(**kwargs):
+        assert kwargs["charge"] == "ch_123345345"
+        assert kwargs["amount"] == 500
+        assert kwargs["stripe_account"] == "acct_test"
+        assert kwargs["refund_application_fee"] is True
+        r = Object()
+        r.id = "re_foo"
+        r.status = "succeeded"
+        return r
+
+    monkeypatch.setattr("stripe.Refund.create", refund_create)
+    order.status = Order.STATUS_PAID
+    payment = order.payments.create(
+        provider="stripe_cc",
+        amount=order.total,
+        info=json.dumps({"id": "ch_123345345", "application_fee_amount": 100}),
+    )
+    order.save()
+    provider = StripeCreditCard(event)
+    refund = order.refunds.create(
+        provider="stripe_cc",
+        amount=Decimal("5.00"),
+        payment=payment,
+    )
+
+    provider.execute_refund(refund)
+
     refund.refresh_from_db()
     assert refund.state == OrderRefund.REFUND_STATE_DONE
 
