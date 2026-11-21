@@ -69,11 +69,13 @@ The repository has **two test roots**. `tests/test_utils.py`,
 helpers. `eventyay_stripe/tests/` contains database-backed `test_provider.py`,
 `test_checkout.py`, `test_settings.py`, and `test_webhook.py`.
 
-Current CI invokes `pytest tests --reruns 3`, and `pyproject.toml` sets
-`testpaths = ["tests"]`; that selection does not include the nested suite. For
-provider changes, explicitly run `pytest -p no:env tests eventyay_stripe/tests` with core
-Django settings and test services from [development](development.md). The nested
-tests also skip at module level if the settings environment variable is absent.
+CI runs `pytest tests eventyay_stripe/tests --reruns 3` once with `stripe==11.3.*`
+and once with `stripe==15.*`, so both suites run against the pinned and the next
+major Stripe SDK. `pyproject.toml` still sets `testpaths = ["tests"]`, so a bare
+`pytest` locally selects only the helper suite; run
+`pytest -p no:env tests eventyay_stripe/tests` with core Django settings and test
+services from [development](development.md). The nested tests also skip at module
+level if the settings environment variable is absent.
 Even with settings supplied, `test_webhook.py` unconditionally skips the entire
 module, and the checkout test in `test_checkout.py` is also unconditionally
 skipped because their multidomain/session setup is incomplete. Use `-rs` to
