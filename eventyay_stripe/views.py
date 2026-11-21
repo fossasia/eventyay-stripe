@@ -41,6 +41,7 @@ from eventyay.multidomain.urlreverse import build_absolute_uri, eventreverse
 from .models import ReferencedStripeObject
 from .payment import StripeCreditCard, StripeSettingsHolder
 from .tasks import get_domain_for_event, stripe_verify_domain
+from .utils import stripe_charge_source_type, stripe_object_to_dict
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,7 @@ def oauth_return(request, *args, **kwargs):
         code = request.GET.get("code")
         data = stripe.OAuth.token(grant_type="authorization_code", code=code)
         if "error" not in data:
-            account = stripe.Account.retrieve(data["stripe_user_id"], api_key=stripe.api_key)
+            account = stripe_object_to_dict(stripe.Account.retrieve(data["stripe_user_id"], api_key=stripe.api_key))
     except stripe.error.StripeError as e:
         logger.exception("Failed to obtain OAuth token %s", e)
         messages.error(request, _("An error occurred during connecting with Stripe, please try again."))
@@ -311,9 +312,7 @@ def charge_webhook(event, event_json, charge_id, rso):
         if not payment:
             payment = order.payments.create(
                 state=OrderPayment.PAYMENT_STATE_CREATED,
-                provider=(
-                    SOURCE_TYPES.get(charge["source"].get("type", charge["source"].get("object", "card")), "stripe")
-                ),
+                provider=SOURCE_TYPES.get(stripe_charge_source_type(charge), "stripe"),
                 amount=prov._amount_to_decimal(charge["amount"]),
                 info=str(charge),
             )
