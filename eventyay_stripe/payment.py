@@ -47,7 +47,7 @@ from pydantic import ValidationError
 from . import __version__
 from .models import ReferencedStripeObject, RegisteredApplePayDomain
 from .tasks import get_stripe_account_key, stripe_verify_domain
-from .utils import shredded_stripe_payment_info
+from .utils import shredded_stripe_payment_info, stripe_object_to_dict
 from .validation_models import (
     LatestCharge,
     PaymentInfoData,
@@ -1274,7 +1274,9 @@ class StripeCreditCard(StripeMethod):
                 if isinstance(latest_charge, str):
                     latest_charge = stripe.Charge.retrieve(latest_charge, **self.api_config)
                     validated_charge = LatestCharge(
-                        payment_method_details=PaymentMethodDetails(**latest_charge.get("payment_method_details", {}))
+                        payment_method_details=PaymentMethodDetails(
+                            **(stripe_object_to_dict(latest_charge).get("payment_method_details") or {})
+                        )
                     )
                     card = validated_charge.payment_method_details.card
                 elif isinstance(payment_data.latest_charge, LatestCharge):
