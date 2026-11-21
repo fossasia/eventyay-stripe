@@ -16,7 +16,12 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    name: Stripe Plugin Tests
+    name: Stripe Plugin Tests (stripe ${{ matrix.stripe }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # The version the plugin pins, and the next major version it is being prepared for.
+        stripe: ["11.3.*", "15.*"]
 
     services:
       postgres:
@@ -69,6 +74,8 @@ jobs:
           cd ../eventyay/app
           uv sync --all-extras --all-groups
           uv pip install -e "../../$(basename "$GITHUB_WORKSPACE")"
+          uv pip install "stripe==${{ matrix.stripe }}"
+          uv pip show stripe | grep -i '^version'
 
       - name: Compile translations
         run: |
@@ -87,4 +94,4 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/../eventyay/app
         run: |
           . ../eventyay/app/.venv/bin/activate
-          pytest tests --reruns 3
+          pytest tests eventyay_stripe/tests --reruns 3
