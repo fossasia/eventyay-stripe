@@ -79,7 +79,7 @@ requires-dist = [
     { name = "pytest-django", marker = "extra == 'test'", specifier = ">=4.14.0" },
     { name = "pytest-env", marker = "extra == 'test'", specifier = ">=1.7.0" },
     { name = "pytest-rerunfailures", marker = "extra == 'test'", specifier = ">=16.6" },
-    { name = "stripe", specifier = "==11.3.*" },
+    { name = "stripe", specifier = ">=11.3,<17.2" },
 ]
 provides-extras = ["test"]
 
@@ -281,15 +281,15 @@ wheels = [
 
 [[package]]
 name = "stripe"
-version = "11.3.0"
+version = "17.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "requests" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0d/96/358f9f62960826ee77de447d70e7ed09741dd5d53d684be1371913e51d7f/stripe-11.3.0.tar.gz", hash = "sha256:98e625d9ddbabcecf02666867169696e113d9eaba27979fb310a7a8dfd44097c", size = 1367031, upload-time = "2024-11-20T23:40:16.578Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a8/ec/09fcf4d5a21aa23974470ab7a0f58e1011dec23effce4b6eaf3b103be1b3/stripe-17.1.0.tar.gz", hash = "sha256:767b8e0f350b2b00fae7f8fbe7e28d4c215aac23529c833f0e77ec20c5f3bb48", size = 1670474, upload-time = "2026-11-19T03:49:33.134Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a4/85/2f4365a0112e49ff646bc701b93e8c4eb314812d84149a43898ea88d377d/stripe-11.3.0-py2.py3-none-any.whl", hash = "sha256:9d2e86943e1e4f325835d3860c4f58aa98d49229c9caf67588f9f9b2451e8e56", size = 1617363, upload-time = "2024-11-20T23:40:14.506Z" },
+    { url = "https://files.pythonhosted.org/packages/7d/96/ee86b1748e0ff130474ac042cbeb683ea15ef210948a86bdbd5e73dbf8df/stripe-17.1.0-py3-none-any.whl", hash = "sha256:c8089bacd9f7d95b62e3f4c0fc6cb5dc719eb09b9d09c6ff330800d36bf8b6eb", size = 2690745, upload-time = "2026-11-19T03:49:30.546Z" },
 ]
 
 [[package]]

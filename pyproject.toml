@@ -14,7 +14,7 @@ maintainers = [
 ]
 
 dependencies = [
-    "stripe==11.3.*",
+    "stripe>=11.3,<17.2",
     "pydantic>=2",
 ]
 
