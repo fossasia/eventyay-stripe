@@ -8,7 +8,13 @@ from eventyay.celery_app import app
 from eventyay.multidomain.urlreverse import get_event_domain
 
 from .models import RegisteredApplePayDomain
-from .operational_log import OUTCOME_FAILURE, OUTCOME_SUCCESS, log_operation
+from .operational_log import (
+    OUTCOME_FAILURE,
+    OUTCOME_SUCCESS,
+    log_operation,
+    stripe_error_code,
+    traced_job,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +35,7 @@ def get_stripe_account_key(prov):
 
 
 @app.task(base=EventTask, max_retries=5, default_retry_delay=1)
+@traced_job("stripe_verify_domain")
 def stripe_verify_domain(event, domain):
     from .payment import StripeCreditCard
 
@@ -49,14 +56,14 @@ def stripe_verify_domain(event, domain):
 
     try:
         resp = stripe.ApplePayDomain.create(domain_name=domain, **api_config)
-    except stripe.error.StripeError:
+    except stripe.StripeError as e:
         logger.exception("Could not verify domain with Stripe")
         log_operation(
             "connection.request",
             OUTCOME_FAILURE,
             backend="stripe",
             payment_provider="stripe",
-            error_code="stripe_error",
+            error_code=stripe_error_code(e, "stripe_error"),
             event_id=event.pk,
         )
     else:

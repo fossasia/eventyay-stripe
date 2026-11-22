@@ -18,6 +18,7 @@ from django.http import HttpRequest
 from django.template.loader import get_template
 from django.urls import reverse
 from django.utils.crypto import get_random_string
+from django.utils.html import escape
 from django.utils.safestring import mark_safe
 from django.utils.timezone import now
 from django.utils.translation import gettext, pgettext
@@ -46,7 +47,12 @@ from pydantic import ValidationError
 
 from . import __version__
 from .models import ReferencedStripeObject, RegisteredApplePayDomain
-from .operational_log import OUTCOME_FAILURE, OUTCOME_SUCCESS, log_operation
+from .operational_log import (
+    OUTCOME_FAILURE,
+    OUTCOME_SUCCESS,
+    log_operation,
+    stripe_error_code,
+)
 from .tasks import get_stripe_account_key, stripe_verify_domain
 from .utils import shredded_stripe_payment_info, stripe_int_to_decimal, stripe_object_to_dict
 from .validation_models import (
@@ -167,8 +173,6 @@ class StripeSettingsHolder(BasePaymentProvider):
             )
 
         # Already connected — show account info and disconnect button
-        from django.utils.html import escape
-
         account_name = escape(self.settings.connect_user_name or self.settings.connect_user_id)
         return (
             "<div class='alert alert-success'>"
@@ -500,13 +504,12 @@ class StripeSettingsHolder(BasePaymentProvider):
 class StripeErrorHandlerMixin:
     def handle_card_error(self, e, payment):
         err = e.json_body["error"] if e.json_body else {"message": str(e)}
-        code = err.get("code") if isinstance(err, dict) else None
         log_operation(
             "payment.charge",
             OUTCOME_FAILURE,
             backend="stripe",
-            payment_provider="stripe",
-            error_code=code or "card_error",
+            payment_provider=getattr(payment, "provider", None) or "stripe",
+            error_code=stripe_error_code(e, "card_error"),
             event_id=payment.order.event_id,
             order_id=payment.order_id,
         )
@@ -516,13 +519,12 @@ class StripeErrorHandlerMixin:
 
     def handle_stripe_error(self, e, payment):
         err = e.json_body.get("error", {"message": str(e)}) if e.json_body else {"message": str(e)}
-        code = err.get("code") if isinstance(err, dict) else None
         log_operation(
             "payment.charge",
             OUTCOME_FAILURE,
             backend="stripe",
-            payment_provider="stripe",
-            error_code=code or "stripe_error",
+            payment_provider=getattr(payment, "provider", None) or "stripe",
+            error_code=stripe_error_code(e, "stripe_error"),
             event_id=payment.order.event_id,
             order_id=payment.order_id,
         )
@@ -795,7 +797,7 @@ class StripeMethod(BasePaymentProvider):
                 messages.warning(request, _("Your payment failed. Please try again."))
             payment.fail(info=str(intent))
         else:
-            logger.info("Charge failed: %s", intent)
+            logger.info("Charge failed for order %s", payment.order_id)
             payment.fail(info=str(intent))
             raise PaymentException(_("Stripe reported an error: %s") % intent.last_payment_error.message)
 
@@ -889,27 +891,42 @@ class StripeMethod(BasePaymentProvider):
                 payment_info = json.loads(payment.info)
                 if not intent and "id" in payment_info:
                     intent = retrieve_payment_intent(payment_info)
-        except stripe.error.CardError as e:
+        except stripe.CardError as e:
             self.error_handler.handle_card_error(e, payment)
-        except stripe.error.StripeError as e:
+        except stripe.StripeError as e:
             self.error_handler.handle_stripe_error(e, payment)
         else:
-            if intent is not None:
-                log_operation(
-                    "payment.charge",
-                    OUTCOME_SUCCESS,
-                    backend="stripe",
-                    payment_provider="stripe",
-                    event_id=payment.order.event_id,
-                    order_id=payment.order_id,
-                )
             # stripe update: change source to intent
             ReferencedStripeObject.objects.get_or_create(
                 reference=intent.id,
                 defaults={"order": payment.order, "payment": payment},
             )
             # redirect payment by intent status
-            self._redirect_payment(intent, request, payment)
+            try:
+                self._redirect_payment(intent, request, payment)
+            except PaymentException:
+                log_operation(
+                    "payment.charge",
+                    OUTCOME_FAILURE,
+                    backend="stripe",
+                    payment_provider=self.identifier or "stripe",
+                    error_code="charge_failed",
+                    event_id=payment.order.event_id,
+                    order_id=payment.order_id,
+                    object_id=getattr(intent, "id", None),
+                )
+                raise
+            failed = payment.state == OrderPayment.PAYMENT_STATE_FAILED
+            log_operation(
+                "payment.charge",
+                OUTCOME_FAILURE if failed else OUTCOME_SUCCESS,
+                backend="stripe",
+                payment_provider=self.identifier or "stripe",
+                error_code="requires_payment_method" if failed else None,
+                event_id=payment.order.event_id,
+                order_id=payment.order_id,
+                object_id=getattr(intent, "id", None),
+            )
             return None
 
     def _confirm_intent(self, request, payment):
@@ -938,14 +955,18 @@ class StripeMethod(BasePaymentProvider):
             payment.save()
 
             self._handle_intent_response(request, payment)
-        except stripe.error.CardError as e:
-            if e.json_body:
-                err = e.json_body["error"]
-                logger.exception("Stripe error: %s", str(err))
-            else:
-                err = {"message": str(e)}
-                logger.exception("Stripe error: %s", str(e))
-            logger.info("Stripe card error: %s", str(err))
+        except stripe.CardError as e:
+            err = e.json_body["error"] if e.json_body else {"message": str(e)}
+            logger.exception("Stripe card error")
+            log_operation(
+                "payment.charge",
+                OUTCOME_FAILURE,
+                backend="stripe",
+                payment_provider=self.identifier or "stripe",
+                error_code=stripe_error_code(e, "card_error"),
+                event_id=payment.order.event_id,
+                order_id=payment.order_id,
+            )
             payment.fail(
                 info={
                     "error": True,
@@ -953,13 +974,18 @@ class StripeMethod(BasePaymentProvider):
                 }
             )
             raise PaymentException(_("Stripe reported an error with your card: %s"), err["message"]) from e
-        except stripe.error.InvalidRequestError as e:
-            if e.json_body:
-                err = e.json_body["error"]
-                logger.exception("Stripe error: %s", str(err))
-            else:
-                err = {"message": str(e)}
-                logger.exception("Stripe error: %s", str(e))
+        except stripe.InvalidRequestError as e:
+            err = e.json_body["error"] if e.json_body else {"message": str(e)}
+            logger.exception("Stripe invalid request error")
+            log_operation(
+                "payment.charge",
+                OUTCOME_FAILURE,
+                backend="stripe",
+                payment_provider=self.identifier or "stripe",
+                error_code=stripe_error_code(e, "invalid_request"),
+                event_id=payment.order.event_id,
+                order_id=payment.order_id,
+            )
             payment.fail(
                 info={
                     "error": True,
@@ -978,7 +1004,7 @@ class StripeMethod(BasePaymentProvider):
         try:
             # Stripe version upgrade: change from source to payment intent
             return self._handle_intent_response(request, payment)
-        except stripe.error.StripeError as e:
+        except stripe.StripeError as e:
             self.error_handler.handle_stripe_error(e, payment)
         finally:
             method = f"payment_stripe_{self.method}_payment_method_id"
@@ -1018,6 +1044,15 @@ class StripeMethod(BasePaymentProvider):
                 le.shredded = True
                 le.save(update_fields=["data", "shredded"])
 
+        log_operation(
+            "payment.shred",
+            OUTCOME_SUCCESS,
+            backend="stripe",
+            payment_provider=self.identifier or "stripe",
+            event_id=obj.order.event_id,
+            order_id=obj.order_id,
+        )
+
     @transaction.atomic()
     def execute_refund(self, refund: OrderRefund):
         self._init_api()
@@ -1026,6 +1061,15 @@ class StripeMethod(BasePaymentProvider):
         OrderPayment.objects.select_for_update().get(pk=refund.payment.pk)
 
         if not payment_info:
+            log_operation(
+                "payment.refund",
+                OUTCOME_FAILURE,
+                backend="stripe",
+                payment_provider=self.identifier or "stripe",
+                error_code="missing_payment_info",
+                event_id=refund.order.event_id,
+                order_id=refund.order_id,
+            )
             raise PaymentException(_("No payment information found."))
 
         try:
@@ -1054,16 +1098,22 @@ class StripeMethod(BasePaymentProvider):
                 **refund_connect_args,
             )
         except (
-            stripe.error.InvalidRequestError,
-            stripe.error.AuthenticationError,
-            stripe.error.APIConnectionError,
+            stripe.InvalidRequestError,
+            stripe.AuthenticationError,
+            stripe.APIConnectionError,
         ) as e:
-            if e.json_body and "error" in e.json_body:
-                err = e.json_body["error"]
-                logger.exception("Stripe error: %s", str(err))
-            else:
-                err = {"message": str(e)}
-                logger.exception("Stripe error: %s", str(e))
+            err = e.json_body["error"] if (e.json_body and "error" in e.json_body) else {"message": str(e)}
+            err_code = stripe_error_code(e, "stripe_error")
+            logger.exception("Stripe refund error (%s)", err_code)
+            log_operation(
+                "payment.refund",
+                OUTCOME_FAILURE,
+                backend="stripe",
+                payment_provider=self.identifier or "stripe",
+                error_code=err_code,
+                event_id=refund.order.event_id,
+                order_id=refund.order_id,
+            )
             refund.info_data = err
             refund.state = OrderRefund.REFUND_STATE_FAILED
             refund.execution_date = now()
@@ -1082,17 +1132,46 @@ class StripeMethod(BasePaymentProvider):
                     "support if the problem persists."
                 )
             ) from e
-        except stripe.error.StripeError as err:
-            logger.error("Stripe error: %s", str(err))
+        except stripe.StripeError as err:
+            err_code = stripe_error_code(err, "stripe_error")
+            logger.error("Stripe refund error (%s)", err_code)
+            log_operation(
+                "payment.refund",
+                OUTCOME_FAILURE,
+                backend="stripe",
+                payment_provider=self.identifier or "stripe",
+                error_code=err_code,
+                event_id=refund.order.event_id,
+                order_id=refund.order_id,
+            )
             raise PaymentException(_("Stripe returned an error")) from err
         else:
             refund.info = str(r)
             if r.status in ("succeeded", "pending"):
                 refund.done()
+                log_operation(
+                    "payment.refund",
+                    OUTCOME_SUCCESS,
+                    backend="stripe",
+                    payment_provider=self.identifier or "stripe",
+                    event_id=refund.order.event_id,
+                    order_id=refund.order_id,
+                    object_id=getattr(r, "id", None),
+                )
             elif r.status in ("failed", "canceled"):
                 refund.state = OrderRefund.REFUND_STATE_FAILED
                 refund.execution_date = now()
                 refund.save()
+                log_operation(
+                    "payment.refund",
+                    OUTCOME_FAILURE,
+                    backend="stripe",
+                    payment_provider=self.identifier or "stripe",
+                    error_code=f"refund_{r.status}",
+                    event_id=refund.order.event_id,
+                    order_id=refund.order_id,
+                    object_id=getattr(r, "id", None),
+                )
 
 
 class Redirector(StripeMethod):
@@ -1228,26 +1307,41 @@ class StripeCreditCard(StripeMethod):
                 if not intent:
                     intent = self.intent_factory.retrieve_payment_intent(payment_info, **self.api_config)
 
-        except stripe.error.CardError as e:
+        except stripe.CardError as e:
             self.error_handler.handle_card_error(e, payment)
 
-        except stripe.error.StripeError as e:
+        except stripe.StripeError as e:
             self.error_handler.handle_stripe_error(e, payment)
 
         else:
-            if intent is not None:
-                log_operation(
-                    "payment.charge",
-                    OUTCOME_SUCCESS,
-                    backend="stripe",
-                    payment_provider="stripe",
-                    event_id=payment.order.event_id,
-                    order_id=payment.order_id,
-                )
             ReferencedStripeObject.objects.get_or_create(
                 reference=intent.id, defaults={"order": payment.order, "payment": payment}
             )
-            self._redirect_payment(intent, request, payment)
+            try:
+                self._redirect_payment(intent, request, payment)
+            except PaymentException:
+                log_operation(
+                    "payment.charge",
+                    OUTCOME_FAILURE,
+                    backend="stripe",
+                    payment_provider=self.identifier or "stripe",
+                    error_code="charge_failed",
+                    event_id=payment.order.event_id,
+                    order_id=payment.order_id,
+                    object_id=getattr(intent, "id", None),
+                )
+                raise
+            failed = payment.state == OrderPayment.PAYMENT_STATE_FAILED
+            log_operation(
+                "payment.charge",
+                OUTCOME_FAILURE if failed else OUTCOME_SUCCESS,
+                backend="stripe",
+                payment_provider=self.identifier or "stripe",
+                error_code="requires_payment_method" if failed else None,
+                event_id=payment.order.event_id,
+                order_id=payment.order_id,
+                object_id=getattr(intent, "id", None),
+            )
 
     def _confirm_intent(self, request, payment):
         self._init_api()
@@ -1274,10 +1368,18 @@ class StripeCreditCard(StripeMethod):
             payment.save()
 
             self._handle_intent_response(request, payment)
-        except stripe.error.CardError as e:
+        except stripe.CardError as e:
             err = e.json_body["error"] if e.json_body else {"message": str(e)}
-            logger.exception("Stripe error: %s", err)
-            logger.info("Stripe card error: %s", err)
+            logger.exception("Stripe card error")
+            log_operation(
+                "payment.charge",
+                OUTCOME_FAILURE,
+                backend="stripe",
+                payment_provider=self.identifier or "stripe",
+                error_code=stripe_error_code(e, "card_error"),
+                event_id=payment.order.event_id,
+                order_id=payment.order_id,
+            )
             payment.fail(
                 info={
                     "error": True,
@@ -1285,13 +1387,18 @@ class StripeCreditCard(StripeMethod):
                 }
             )
             raise PaymentException(_("Stripe reported an error with your card: %s") % err["message"]) from e
-        except stripe.error.InvalidRequestError as e:
-            if e.json_body:
-                err = e.json_body["error"]
-                logger.exception("Stripe error: %s", str(err))
-            else:
-                err = {"message": str(e)}
-                logger.exception("Stripe error: %s", str(e))
+        except stripe.InvalidRequestError as e:
+            err = e.json_body["error"] if e.json_body else {"message": str(e)}
+            logger.exception("Stripe invalid request error")
+            log_operation(
+                "payment.charge",
+                OUTCOME_FAILURE,
+                backend="stripe",
+                payment_provider=self.identifier or "stripe",
+                error_code=stripe_error_code(e, "invalid_request"),
+                event_id=payment.order.event_id,
+                order_id=payment.order_id,
+            )
             payment.fail(
                 info={
                     "error": True,

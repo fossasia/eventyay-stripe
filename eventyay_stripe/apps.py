@@ -2,6 +2,7 @@ from django.apps import AppConfig
 from django.utils.translation import gettext_lazy as _
 
 from . import __version__
+from .operational_log import log_plugin_loaded
 
 
 class StripePluginApp(AppConfig):
@@ -19,8 +20,6 @@ class StripePluginApp(AppConfig):
         description = _("This plugin allows you to receive credit card payments " + "via Stripe.")
 
     def ready(self):
-        from .operational_log import log_plugin_loaded
-
         log_plugin_loaded("stripe")
         from . import signals, tasks  # NOQA
 
