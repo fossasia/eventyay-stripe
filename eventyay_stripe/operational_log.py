@@ -4,7 +4,7 @@ Delegates to the host logger when it is importable. Otherwise uses
 ``eventyay.plugins``. Logging never raises into product code.
 
 Emails, names, tokens, secrets, and request or response bodies are dropped.
-Only opaque IDs, status codes, and safe error codes are kept.
+Only opaque IDs, status codes, durations, and safe error codes are kept.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from __future__ import annotations
 import functools
 import logging
 import re
+from contextvars import ContextVar
 
 try:
     from celery import current_task as _CELERY_CURRENT_TASK
@@ -19,12 +20,25 @@ except Exception:
     _CELERY_CURRENT_TASK = None
 
 try:
-    from eventyay.base.operational_logging import log_event as _HOST_LOG_EVENT
+    from eventyay.base.operational_logging import (
+        get_job_id as _HOST_GET_JOB_ID,
+    )
+    from eventyay.base.operational_logging import (
+        get_request_id as _HOST_GET_REQUEST_ID,
+    )
+    from eventyay.base.operational_logging import (
+        log_event as _HOST_LOG_EVENT,
+    )
 except Exception:
     _HOST_LOG_EVENT = None
+    _HOST_GET_REQUEST_ID = None
+    _HOST_GET_JOB_ID = None
 
 OUTCOME_SUCCESS = "success"
 OUTCOME_FAILURE = "failure"
+
+_ACTIVE_REQUEST_ID: ContextVar[str | None] = ContextVar("eventyay_stripe_request_id", default=None)
+_ACTIVE_JOB_ID: ContextVar[str | None] = ContextVar("eventyay_stripe_job_id", default=None)
 
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _LOGGER = logging.getLogger("eventyay.plugins")
@@ -34,6 +48,7 @@ _INT_FIELDS = frozenset(
         "order_id",
         "user_id",
         "status",
+        "duration_ms",
         "retry_count",
     }
 )
@@ -43,7 +58,9 @@ _IDENTIFIER_FIELDS = frozenset(
         "backend",
         "job_name",
         "job_id",
+        "request_id",
         "payment_provider",
+        "model",
     }
 )
 
@@ -52,6 +69,40 @@ def _safe_identifier(value):
     if isinstance(value, str) and _SAFE_IDENTIFIER.fullmatch(value):
         return value
     return None
+
+
+def bind_request_id(request_id):
+    return _ACTIVE_REQUEST_ID.set(_safe_identifier(request_id))
+
+
+def reset_request_id(token=None):
+    if token is not None:
+        _ACTIVE_REQUEST_ID.reset(token)
+    else:
+        _ACTIVE_REQUEST_ID.set(None)
+
+
+def get_request_id():
+    rid = _ACTIVE_REQUEST_ID.get()
+    if rid is None and _HOST_GET_REQUEST_ID is not None:
+        try:
+            rid = _HOST_GET_REQUEST_ID()
+        except Exception:
+            rid = None
+    return _safe_identifier(rid)
+
+
+def get_job_id():
+    jid = _ACTIVE_JOB_ID.get()
+    if jid is None and _HOST_GET_JOB_ID is not None:
+        try:
+            jid = _HOST_GET_JOB_ID()
+        except Exception:
+            jid = None
+    if jid is None and _CELERY_CURRENT_TASK is not None:
+        req = getattr(_CELERY_CURRENT_TASK, "request", None)
+        jid = getattr(req, "id", None) if req is not None else None
+    return _safe_identifier(jid)
 
 
 def stripe_error_code(exc, default="stripe_error"):
@@ -104,6 +155,14 @@ def log_operation(action, outcome, **fields):
             outcome = OUTCOME_FAILURE
         level = logging.WARNING if outcome == OUTCOME_FAILURE else logging.INFO
         payload = _clean(fields)
+        if "job_id" not in payload:
+            active_job_id = get_job_id()
+            if active_job_id is not None:
+                payload["job_id"] = active_job_id
+        if "request_id" not in payload:
+            active_request_id = get_request_id()
+            if active_request_id is not None:
+                payload["request_id"] = active_request_id
         if _HOST_LOG_EVENT is not None:
             try:
                 _HOST_LOG_EVENT("plugins", action, outcome, level=level, **payload)
@@ -166,24 +225,30 @@ def traced_job(job_name):
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             task, job_id = _extract_task_and_job_id(args)
-            log_operation("job.start", OUTCOME_SUCCESS, job_name=job_name, job_id=job_id)
+            if job_id is None:
+                job_id = get_job_id()
+            token = _ACTIVE_JOB_ID.set(_safe_identifier(job_id))
             try:
-                result = fn(*args, **kwargs)
-            except Exception as exc:
-                retried = type(exc).__name__ == "Retry" or _will_autoretry(task, exc)
-                req = getattr(task, "request", None) if task is not None else None
-                retries = getattr(req, "retries", None) if req is not None else None
-                log_operation(
-                    "job.retry" if retried else "job.fail",
-                    OUTCOME_FAILURE,
-                    job_name=job_name,
-                    job_id=job_id,
-                    error_code="retry" if retried else type(exc).__name__,
-                    retry_count=retries if isinstance(retries, int) and not isinstance(retries, bool) else None,
-                )
-                raise
-            log_operation("job.finish", OUTCOME_SUCCESS, job_name=job_name, job_id=job_id)
-            return result
+                log_operation("job.start", OUTCOME_SUCCESS, job_name=job_name, job_id=job_id)
+                try:
+                    result = fn(*args, **kwargs)
+                except Exception as exc:
+                    retried = type(exc).__name__ == "Retry" or _will_autoretry(task, exc)
+                    req = getattr(task, "request", None) if task is not None else None
+                    retries = getattr(req, "retries", None) if req is not None else None
+                    log_operation(
+                        "job.retry" if retried else "job.fail",
+                        OUTCOME_FAILURE,
+                        job_name=job_name,
+                        job_id=job_id,
+                        error_code="retry" if retried else type(exc).__name__,
+                        retry_count=retries if isinstance(retries, int) and not isinstance(retries, bool) else None,
+                    )
+                    raise
+                log_operation("job.finish", OUTCOME_SUCCESS, job_name=job_name, job_id=job_id)
+                return result
+            finally:
+                _ACTIVE_JOB_ID.reset(token)
 
         return wrapper
 

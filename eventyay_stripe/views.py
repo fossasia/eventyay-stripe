@@ -1,3 +1,4 @@
+import functools
 import hashlib
 import json
 import logging
@@ -7,6 +8,7 @@ from http import HTTPStatus
 import stripe
 from django.contrib import messages
 from django.core import signing
+from django.core.exceptions import PermissionDenied
 from django.db import transaction
 from django.http import Http404, HttpResponse, HttpResponseBadRequest
 from django.shortcuts import get_object_or_404, redirect, render
@@ -50,6 +52,46 @@ from .tasks import get_domain_for_event, stripe_verify_domain
 from .utils import stripe_charge_source_type, stripe_object_to_dict
 
 logger = logging.getLogger(__name__)
+
+
+def _log_authenticated_permission_denied(request, resource_type, object_id=None, event_id=None):
+    user = getattr(request, "user", None)
+    if user is not None and getattr(user, "is_authenticated", False):
+        log_operation(
+            "permission.denied",
+            OUTCOME_FAILURE,
+            backend="stripe",
+            error_code="forbidden",
+            status=403,
+            user_id=getattr(user, "pk", None),
+            event_id=event_id,
+            model=resource_type,
+            object_id=object_id,
+        )
+
+
+def _log_event_permission_denied(permission):
+    def decorator(view_func):
+        guarded = event_permission_required(permission)(view_func)
+
+        @functools.wraps(view_func)
+        def wrapper(request, *args, **kwargs):
+            try:
+                return guarded(request, *args, **kwargs)
+            except PermissionDenied:
+                event = getattr(request, "event", None)
+                event_id = getattr(event, "pk", None)
+                _log_authenticated_permission_denied(
+                    request,
+                    "event",
+                    object_id=event_id,
+                    event_id=event_id,
+                )
+                raise
+
+        return wrapper
+
+    return decorator
 
 
 @xframe_options_exempt
@@ -105,6 +147,8 @@ def oauth_return(request, *args, **kwargs):
             error_code="invalid_oauth_state",
             status=302,
             event_id=event.pk,
+            model="event",
+            object_id=event.pk,
         )
         messages.error(request, _("An error occurred during connecting with Stripe, please try again."))
         return redirect_to_url(
@@ -126,12 +170,13 @@ def oauth_return(request, *args, **kwargs):
         if "error" not in data:
             account = stripe_object_to_dict(stripe.Account.retrieve(data["stripe_user_id"], api_key=stripe.api_key))
     except stripe.StripeError as e:
-        logger.exception("Failed to obtain OAuth token")
+        err_code = stripe_error_code(e, "oauth_token_error")
+        logger.error("Failed to obtain OAuth token (event_id=%s, error_code=%s)", event.pk, err_code)
         log_operation(
             "connection.oauth",
             OUTCOME_FAILURE,
             backend="stripe",
-            error_code=stripe_error_code(e, "oauth_token_error"),
+            error_code=err_code,
             event_id=event.pk,
         )
         messages.error(request, _("An error occurred during connecting with Stripe, please try again."))
@@ -144,12 +189,13 @@ def oauth_return(request, *args, **kwargs):
                     client_secret=gs.settings.payment_stripe_connect_test_secret_key,
                 )
             except stripe.StripeError as e:
-                logger.exception("Failed to obtain OAuth token")
+                err_code = stripe_error_code(e, "oauth_test_token_error")
+                logger.error("Failed to obtain OAuth token (event_id=%s, error_code=%s)", event.pk, err_code)
                 log_operation(
                     "connection.oauth",
                     OUTCOME_FAILURE,
                     backend="stripe",
-                    error_code=stripe_error_code(e, "oauth_test_token_error"),
+                    error_code=err_code,
                     event_id=event.pk,
                 )
                 messages.error(request, _("An error occurred during connecting with Stripe, please try again."))
@@ -234,7 +280,7 @@ def webhook(request, *args, **kwargs):
     try:
         payload = request.body
         if not payload:
-            logger.exception("Empty payload on webhook")
+            logger.warning("Empty payload on webhook")
             log_operation(
                 "webhook.inbound",
                 OUTCOME_FAILURE,
@@ -251,7 +297,7 @@ def webhook(request, *args, **kwargs):
         # Verify the event with the Stripe library
         stripe.Webhook.construct_event(payload, sig_header, webhook_secret_key)
     except AttributeError:
-        logger.exception("Attribute Error on webhook")
+        logger.warning("Attribute Error on webhook")
         log_operation(
             "webhook.inbound",
             OUTCOME_FAILURE,
@@ -262,7 +308,7 @@ def webhook(request, *args, **kwargs):
         )
         return HttpResponse("Cannot verify Stripe signature", status=HTTPStatus.BAD_REQUEST)
     except (json.decoder.JSONDecodeError, ValueError):
-        logger.exception("Invalid payload on webhook")
+        logger.warning("Invalid payload on webhook")
         log_operation(
             "webhook.inbound",
             OUTCOME_FAILURE,
@@ -273,7 +319,7 @@ def webhook(request, *args, **kwargs):
         )
         return HttpResponse("Invalid payload", status=HTTPStatus.BAD_REQUEST)
     except stripe.SignatureVerificationError:
-        logger.exception("Stripe webhook signature verification failed")
+        logger.warning("Stripe webhook signature verification failed")
         log_operation(
             "webhook.inbound",
             OUTCOME_FAILURE,
@@ -607,7 +653,16 @@ def source_webhook(event, event_json, source_id, rso):
             try:
                 prov._charge_source(None, source_id, payment)
             except PaymentException:
-                logger.exception("Webhook error")
+                logger.error("Webhook error (event_id=%s, order_id=%s)", event.pk, order.pk)
+                log_operation(
+                    "payment.charge",
+                    OUTCOME_FAILURE,
+                    backend="stripe",
+                    payment_provider=prov.identifier or "stripe",
+                    error_code="charge_failed",
+                    event_id=event.pk,
+                    order_id=order.pk,
+                )
         elif src.status == "failed":
             payment.fail(info=str(src))
         elif src.status == "canceled" and payment.state in (
@@ -657,7 +712,7 @@ def paymentintent_webhook(event, event_json, paymentintent_id, rso):
     return HttpResponse(status=HTTPStatus.OK)
 
 
-@event_permission_required("can_change_event_settings")
+@_log_event_permission_denied("can_change_event_settings")
 def oauth_disconnect(request, **kwargs):
     if request.method != "POST":
         return render(request, "plugins/stripe/oauth_disconnect.html", {})
@@ -749,13 +804,19 @@ class ReturnView(StripeOrderView, View):
         try:
             src = stripe.Source.retrieve(request.GET.get("source"), **prov.api_config)
         except stripe.InvalidRequestError as e:
-            logger.exception("Could not retrieve source")
+            err_code = stripe_error_code(e, "source_retrieve_failed")
+            logger.error(
+                "Could not retrieve source (event_id=%s, order_id=%s, error_code=%s)",
+                self.order.event_id,
+                self.order.pk,
+                err_code,
+            )
             log_operation(
                 "payment.return",
                 OUTCOME_FAILURE,
                 backend="stripe",
                 payment_provider=self.payment.provider,
-                error_code=stripe_error_code(e, "source_retrieve_failed"),
+                error_code=err_code,
                 event_id=self.order.event_id,
                 order_id=self.order.pk,
             )
@@ -908,13 +969,19 @@ class ScaView(StripeOrderView, View):
             try:
                 return stripe.PaymentIntent.retrieve(payment_info["id"], expand=["latest_charge"], **prov.api_config)
             except stripe.InvalidRequestError as e:
-                logger.exception("Could not retrieve payment intent")
+                err_code = stripe_error_code(e, "intent_retrieve_failed")
+                logger.error(
+                    "Could not retrieve payment intent (event_id=%s, order_id=%s, error_code=%s)",
+                    self.order.event_id,
+                    self.order.pk,
+                    err_code,
+                )
                 log_operation(
                     "payment.sca",
                     OUTCOME_FAILURE,
                     backend="stripe",
                     payment_provider=self.payment.provider,
-                    error_code=stripe_error_code(e, "intent_retrieve_failed"),
+                    error_code=err_code,
                     event_id=self.order.event_id,
                     order_id=self.order.pk,
                 )
@@ -967,6 +1034,20 @@ class ScaView(StripeOrderView, View):
                 order_id=self.order.pk,
             )
             messages.error(request, str(e))
+        else:
+            failed = self.payment.state in (
+                OrderPayment.PAYMENT_STATE_FAILED,
+                OrderPayment.PAYMENT_STATE_CANCELED,
+            )
+            log_operation(
+                "payment.sca",
+                OUTCOME_FAILURE if failed else OUTCOME_SUCCESS,
+                backend="stripe",
+                payment_provider=self.payment.provider,
+                error_code="requires_payment_method" if failed else None,
+                event_id=self.order.event_id,
+                order_id=self.order.pk,
+            )
 
         return self._redirect_to_order()
 
@@ -990,11 +1071,16 @@ class ScaReturnView(StripeOrderView, View):
             )
             messages.error(request, str(e))
         else:
+            failed = self.payment.state in (
+                OrderPayment.PAYMENT_STATE_FAILED,
+                OrderPayment.PAYMENT_STATE_CANCELED,
+            )
             log_operation(
                 "payment.sca",
-                OUTCOME_SUCCESS,
+                OUTCOME_FAILURE if failed else OUTCOME_SUCCESS,
                 backend="stripe",
                 payment_provider=self.payment.provider,
+                error_code="requires_payment_method" if failed else None,
                 event_id=self.order.event_id,
                 order_id=self.order.pk,
             )
@@ -1019,3 +1105,22 @@ class OrganizerSettingsFormView(
     model = Organizer
     permission = "can_change_organizer_settings"
     template_name = "plugins/stripe/organizer_stripe.html"
+
+    @classmethod
+    def as_view(cls, **initkwargs):
+        view = super().as_view(**initkwargs)
+
+        @functools.wraps(view)
+        def wrapper(request, *args, **kwargs):
+            try:
+                return view(request, *args, **kwargs)
+            except PermissionDenied:
+                organizer = getattr(request, "organizer", None)
+                _log_authenticated_permission_denied(
+                    request,
+                    "organizer",
+                    object_id=getattr(organizer, "pk", None),
+                )
+                raise
+
+        return wrapper

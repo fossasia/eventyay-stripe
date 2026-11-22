@@ -504,31 +504,43 @@ class StripeSettingsHolder(BasePaymentProvider):
 class StripeErrorHandlerMixin:
     def handle_card_error(self, e, payment):
         err = e.json_body["error"] if e.json_body else {"message": str(e)}
+        err_code = stripe_error_code(e, "card_error")
         log_operation(
             "payment.charge",
             OUTCOME_FAILURE,
             backend="stripe",
             payment_provider=getattr(payment, "provider", None) or "stripe",
-            error_code=stripe_error_code(e, "card_error"),
+            error_code=err_code,
             event_id=payment.order.event_id,
             order_id=payment.order_id,
         )
-        logger.exception("Stripe card error")
+        logger.error(
+            "Stripe card error (error_code=%s, event_id=%s, order_id=%s)",
+            err_code,
+            payment.order.event_id,
+            payment.order_id,
+        )
         payment.fail(info={"error": True, "message": err["message"]})
         raise PaymentException(_("Stripe reported an error: %s") % err["message"])
 
     def handle_stripe_error(self, e, payment):
         err = e.json_body.get("error", {"message": str(e)}) if e.json_body else {"message": str(e)}
+        err_code = stripe_error_code(e, "stripe_error")
         log_operation(
             "payment.charge",
             OUTCOME_FAILURE,
             backend="stripe",
             payment_provider=getattr(payment, "provider", None) or "stripe",
-            error_code=stripe_error_code(e, "stripe_error"),
+            error_code=err_code,
             event_id=payment.order.event_id,
             order_id=payment.order_id,
         )
-        logger.exception("Stripe error")
+        logger.error(
+            "Stripe error (error_code=%s, event_id=%s, order_id=%s)",
+            err_code,
+            payment.order.event_id,
+            payment.order_id,
+        )
         if err.get("code") != "idempotency_key_in_use":
             payment.fail(info={"error": True, "message": err["message"]})
             raise PaymentException(
@@ -585,7 +597,11 @@ class PaymentIntentFactory:
                     },
                 }
         except Exception as e:
-            logger.warning("Could not set shipping information for payment intent: %s", str(e))
+            logger.warning(
+                "Could not set shipping information for payment intent (order_id=%s, error_type=%s)",
+                payment.order_id,
+                type(e).__name__,
+            )
             raise PaymentException(
                 _("Could not extract shipping information from the order. This is required for payment compliance.")
             ) from e
@@ -957,13 +973,19 @@ class StripeMethod(BasePaymentProvider):
             self._handle_intent_response(request, payment)
         except stripe.CardError as e:
             err = e.json_body["error"] if e.json_body else {"message": str(e)}
-            logger.exception("Stripe card error")
+            err_code = stripe_error_code(e, "card_error")
+            logger.error(
+                "Stripe card error (error_code=%s, event_id=%s, order_id=%s)",
+                err_code,
+                payment.order.event_id,
+                payment.order_id,
+            )
             log_operation(
                 "payment.charge",
                 OUTCOME_FAILURE,
                 backend="stripe",
                 payment_provider=self.identifier or "stripe",
-                error_code=stripe_error_code(e, "card_error"),
+                error_code=err_code,
                 event_id=payment.order.event_id,
                 order_id=payment.order_id,
             )
@@ -976,13 +998,19 @@ class StripeMethod(BasePaymentProvider):
             raise PaymentException(_("Stripe reported an error with your card: %s"), err["message"]) from e
         except stripe.InvalidRequestError as e:
             err = e.json_body["error"] if e.json_body else {"message": str(e)}
-            logger.exception("Stripe invalid request error")
+            err_code = stripe_error_code(e, "invalid_request")
+            logger.error(
+                "Stripe invalid request error (error_code=%s, event_id=%s, order_id=%s)",
+                err_code,
+                payment.order.event_id,
+                payment.order_id,
+            )
             log_operation(
                 "payment.charge",
                 OUTCOME_FAILURE,
                 backend="stripe",
                 payment_provider=self.identifier or "stripe",
-                error_code=stripe_error_code(e, "invalid_request"),
+                error_code=err_code,
                 event_id=payment.order.event_id,
                 order_id=payment.order_id,
             )
@@ -1104,7 +1132,12 @@ class StripeMethod(BasePaymentProvider):
         ) as e:
             err = e.json_body["error"] if (e.json_body and "error" in e.json_body) else {"message": str(e)}
             err_code = stripe_error_code(e, "stripe_error")
-            logger.exception("Stripe refund error (%s)", err_code)
+            logger.error(
+                "Stripe refund error (error_code=%s, event_id=%s, order_id=%s)",
+                err_code,
+                refund.order.event_id,
+                refund.order_id,
+            )
             log_operation(
                 "payment.refund",
                 OUTCOME_FAILURE,
@@ -1370,13 +1403,19 @@ class StripeCreditCard(StripeMethod):
             self._handle_intent_response(request, payment)
         except stripe.CardError as e:
             err = e.json_body["error"] if e.json_body else {"message": str(e)}
-            logger.exception("Stripe card error")
+            err_code = stripe_error_code(e, "card_error")
+            logger.error(
+                "Stripe card error (error_code=%s, event_id=%s, order_id=%s)",
+                err_code,
+                payment.order.event_id,
+                payment.order_id,
+            )
             log_operation(
                 "payment.charge",
                 OUTCOME_FAILURE,
                 backend="stripe",
                 payment_provider=self.identifier or "stripe",
-                error_code=stripe_error_code(e, "card_error"),
+                error_code=err_code,
                 event_id=payment.order.event_id,
                 order_id=payment.order_id,
             )
@@ -1389,13 +1428,19 @@ class StripeCreditCard(StripeMethod):
             raise PaymentException(_("Stripe reported an error with your card: %s") % err["message"]) from e
         except stripe.InvalidRequestError as e:
             err = e.json_body["error"] if e.json_body else {"message": str(e)}
-            logger.exception("Stripe invalid request error")
+            err_code = stripe_error_code(e, "invalid_request")
+            logger.error(
+                "Stripe invalid request error (error_code=%s, event_id=%s, order_id=%s)",
+                err_code,
+                payment.order.event_id,
+                payment.order_id,
+            )
             log_operation(
                 "payment.charge",
                 OUTCOME_FAILURE,
                 backend="stripe",
                 payment_provider=self.identifier or "stripe",
-                error_code=stripe_error_code(e, "invalid_request"),
+                error_code=err_code,
                 event_id=payment.order.event_id,
                 order_id=payment.order_id,
             )
@@ -1446,10 +1491,10 @@ class StripeCreditCard(StripeMethod):
                 f"{_('expires {month}/{year}').format(month=card.exp_month, year=card.exp_year)}"
             )
         except ValidationError as e:
-            logger.exception("Validation error occurred: %s", e)
+            logger.error("Validation error occurred (%s, payment_id=%s)", type(e).__name__, payment.pk)
             return super().payment_presale_render(payment)
         except KeyError as e:
-            logger.exception("Could not parse payment data: %s", e)
+            logger.error("Could not parse payment data (%s, payment_id=%s)", type(e).__name__, payment.pk)
             return super().payment_presale_render(payment)
 
 
@@ -1482,10 +1527,10 @@ class StripeIdeal(Redirector):
                 bank = None
             bank = "" if bank is None else bank.replace("_", " ").title()
         except ValidationError as e:
-            logger.exception("Validation error occurred: %s", e)
+            logger.error("Validation error occurred (%s, payment_id=%s)", type(e).__name__, payment.pk)
             return super().payment_presale_render(payment)
         except KeyError as e:
-            logger.exception("Could not parse payment data: %s", e)
+            logger.error("Could not parse payment data (%s, payment_id=%s)", type(e).__name__, payment.pk)
             return super().payment_presale_render(payment)
 
 
@@ -1565,10 +1610,10 @@ class StripeBancontact(Redirector):
                 return super().payment_presale_render(payment)
             return gettext(f"Bank account at {bank}")
         except ValidationError as e:
-            logger.exception("Validation error occurred: %s", e)
+            logger.error("Validation error occurred (%s, payment_id=%s)", type(e).__name__, payment.pk)
             return super().payment_presale_render(payment)
         except KeyError as e:
-            logger.exception("Could not parse payment data %s", e)
+            logger.error("Could not parse payment data (%s, payment_id=%s)", type(e).__name__, payment.pk)
             return super().payment_presale_render(payment)
 
     def _intent_api_args(self, request, payment):
@@ -1645,10 +1690,10 @@ class StripeSofort(StripeMethod):
                 bank=payment_data.source.sofort.bank_name,
             )
         except ValidationError as e:
-            logger.exception("Validation error occurred: %s", e)
+            logger.error("Validation error occurred (%s, payment_id=%s)", type(e).__name__, payment.pk)
             return super().payment_presale_render(payment)
         except KeyError as e:
-            logger.exception("Could not parse payment data %s", e)
+            logger.error("Could not parse payment data (%s, payment_id=%s)", type(e).__name__, payment.pk)
             return super().payment_presale_render(payment)
 
     def _intent_api_args(self, request, payment):
@@ -1725,10 +1770,10 @@ class StripeEPS(Redirector):
             return gettext(f"Bank account at {bank}")
 
         except ValidationError as e:
-            logger.exception("Validation error occurred: %s", e)
+            logger.error("Validation error occurred (%s, payment_id=%s)", type(e).__name__, payment.pk)
             return super().payment_presale_render(payment)
         except KeyError as e:
-            logger.exception("Could not parse payment data: %s", e)
+            logger.error("Could not parse payment data (%s, payment_id=%s)", type(e).__name__, payment.pk)
             return super().payment_presale_render(payment)
 
     def _intent_api_args(self, request, payment):
@@ -1788,10 +1833,10 @@ class StripePrzelewy24(Redirector):
             bank = "" if bank is None else bank.replace("_", " ").title()
             return gettext(f"Bank account at {bank}")
         except ValidationError as e:
-            logger.exception("Validation error occurred: %s", e)
+            logger.error("Validation error occurred (%s, payment_id=%s)", type(e).__name__, payment.pk)
             return super().payment_presale_render(payment)
         except KeyError as e:
-            logger.exception("Could not parse payment data: %s", e)
+            logger.error("Could not parse payment data (%s, payment_id=%s)", type(e).__name__, payment.pk)
             return super().payment_presale_render(payment)
 
 

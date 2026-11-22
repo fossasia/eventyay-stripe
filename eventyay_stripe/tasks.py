@@ -1,4 +1,5 @@
 import logging
+import time
 from urllib.parse import urlsplit
 
 import stripe
@@ -54,25 +55,35 @@ def stripe_verify_domain(event, domain):
     if RegisteredApplePayDomain.objects.filter(account=account, domain=domain).exists():
         return
 
+    started = time.monotonic()
     try:
         resp = stripe.ApplePayDomain.create(domain_name=domain, **api_config)
     except stripe.StripeError as e:
-        logger.exception("Could not verify domain with Stripe")
+        duration_ms = int((time.monotonic() - started) * 1000)
+        err_code = stripe_error_code(e, "stripe_error")
+        http_status = getattr(e, "http_status", None)
+        logger.error("Could not verify domain with Stripe (event_id=%s, error_code=%s)", event.pk, err_code)
         log_operation(
             "connection.request",
             OUTCOME_FAILURE,
             backend="stripe",
             payment_provider="stripe",
-            error_code=stripe_error_code(e, "stripe_error"),
+            error_code=err_code,
+            status=http_status if isinstance(http_status, int) and not isinstance(http_status, bool) else None,
+            duration_ms=duration_ms,
             event_id=event.pk,
         )
     else:
+        duration_ms = int((time.monotonic() - started) * 1000)
+        last_resp = getattr(resp, "last_response", None)
+        resp_status = getattr(last_resp, "code", None)
         log_operation(
             "connection.request",
             OUTCOME_SUCCESS,
             backend="stripe",
             payment_provider="stripe",
-            status=200,
+            status=resp_status if isinstance(resp_status, int) and not isinstance(resp_status, bool) else None,
+            duration_ms=duration_ms,
             event_id=event.pk,
         )
         if resp.livemode:

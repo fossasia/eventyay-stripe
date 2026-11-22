@@ -10,6 +10,7 @@ from http import HTTPStatus
 import django
 import pytest
 import stripe
+from django.core.exceptions import PermissionDenied
 from django.http import HttpResponse
 from django.test import RequestFactory
 
@@ -17,8 +18,10 @@ from eventyay_stripe import operational_log
 from eventyay_stripe.operational_log import (
     OUTCOME_FAILURE,
     OUTCOME_SUCCESS,
+    bind_request_id,
     log_operation,
     log_plugin_loaded,
+    reset_request_id,
     stripe_error_code,
     traced_job,
 )
@@ -43,6 +46,22 @@ def _import_views():
             import eventyay_stripe.views as views_mod
 
             return views_mod
+
+
+def _import_payment():
+    if "eventyay_stripe.payment" in sys.modules:
+        return sys.modules["eventyay_stripe.payment"]
+
+    _import_views()
+    return sys.modules["eventyay_stripe.payment"]
+
+
+def _import_tasks():
+    if "eventyay_stripe.tasks" in sys.modules:
+        return sys.modules["eventyay_stripe.tasks"]
+
+    _import_views()
+    return sys.modules["eventyay_stripe.tasks"]
 
 
 @pytest.fixture
@@ -74,9 +93,10 @@ def test_drops_email_token_and_unknown_fields(captured):
     assert len(captured) == 1
     extra = captured[0][2]
     assert extra["backend"] == "stripe"
+    assert extra["model"] == "Order"
     assert extra["event_id"] == 12
     assert extra["outcome"] == "success"
-    for forbidden in ("email", "token", "body", "webhook_id", "recipient_count", "model", "order_code"):
+    for forbidden in ("email", "token", "body", "webhook_id", "recipient_count", "order_code"):
         assert forbidden not in extra
     blob = str(extra)
     assert "person@example.com" not in blob
@@ -354,3 +374,212 @@ def test_webhook_stripe_retrieval_failure_redacts_event_json_and_pii(captured, m
         assert extra["error_code"] == "resource_missing"
         assert extra["event_id"] == 88
         assert extra["object_id"] == "evt_redact_1"
+
+
+def test_request_id_correlation_in_fallback_logger(captured):
+    token = bind_request_id("req-corr-99")
+    try:
+        log_operation("plugin.loaded", OUTCOME_SUCCESS, backend="stripe")
+    finally:
+        reset_request_id(token)
+
+    assert len(captured) == 1
+    assert captured[0][2]["request_id"] == "req-corr-99"
+
+    captured.clear()
+    log_operation("plugin.loaded", OUTCOME_SUCCESS, backend="stripe")
+    assert "request_id" not in captured[0][2]
+
+
+def test_stripe_verify_domain_propagates_job_id_duration_and_redacts_errors(captured, monkeypatch, caplog):
+    tasks = _import_tasks()
+    fake_event = types.SimpleNamespace(pk=55)
+    fake_provider = types.SimpleNamespace(
+        settings=types.SimpleNamespace(
+            connect_user_id=None,
+            publishable_key="pk_test_123",
+            connect_client_id=None,
+            secret_key="sk_test_secret",
+            connect_secret_key=None,
+            connect_test_secret_key=None,
+        )
+    )
+    payment_mod = _import_payment()
+    monkeypatch.setattr(payment_mod, "StripeCreditCard", lambda ev: fake_provider)
+
+    class FakeQS:
+        def exists(self):
+            return False
+
+    monkeypatch.setattr(tasks.RegisteredApplePayDomain.objects, "filter", lambda **kw: FakeQS())
+    monkeypatch.setattr(tasks.RegisteredApplePayDomain.objects, "create", lambda **kw: None)
+    monkeypatch.setattr(
+        tasks.stripe.ApplePayDomain,
+        "create",
+        lambda **kw: types.SimpleNamespace(livemode=False, last_response=types.SimpleNamespace(code=200)),
+    )
+
+    fake_celery_task = types.SimpleNamespace(request=types.SimpleNamespace(id="celery-domain-1", retries=0))
+    monkeypatch.setattr(operational_log, "_CELERY_CURRENT_TASK", fake_celery_task)
+    tasks.stripe_verify_domain.run(fake_event, "tickets.example.com")
+
+    assert [item[1] for item in captured] == ["job.start", "connection.request", "job.finish"]
+    for _, _, extra in captured:
+        assert extra["job_id"] == "celery-domain-1"
+    conn_extra = captured[1][2]
+    assert conn_extra["outcome"] == OUTCOME_SUCCESS
+    assert conn_extra["status"] == 200
+    assert isinstance(conn_extra["duration_ms"], int)
+    assert conn_extra["duration_ms"] >= 0
+    assert conn_extra["event_id"] == 55
+    assert "tickets.example.com" not in str(captured)
+
+    captured.clear()
+
+    def raise_domain_error(**kw):
+        exc = stripe.StripeError("Secret token sk_test_secret failed", code="domain_invalid")
+        exc.http_status = 400
+        raise exc
+
+    monkeypatch.setattr(tasks.stripe.ApplePayDomain, "create", raise_domain_error)
+    with caplog.at_level(logging.ERROR):
+        tasks.stripe_verify_domain.run(fake_event, "tickets.example.com")
+
+    assert "sk_test_secret" not in caplog.text
+    assert [item[1] for item in captured] == ["job.start", "connection.request", "job.finish"]
+    fail_extra = captured[1][2]
+    assert fail_extra["outcome"] == OUTCOME_FAILURE
+    assert fail_extra["error_code"] == "domain_invalid"
+    assert fail_extra["status"] == 400
+    assert fail_extra["job_id"] == "celery-domain-1"
+    assert isinstance(fail_extra["duration_ms"], int)
+
+
+def test_error_handler_mixin_does_not_leak_exception_text(captured, caplog):
+    payment_mod = _import_payment()
+    mixin = payment_mod.StripeErrorHandlerMixin()
+    fake_payment = types.SimpleNamespace(
+        provider="stripe",
+        order_id=321,
+        order=types.SimpleNamespace(event_id=654),
+        fail=lambda **kw: None,
+    )
+
+    card_err = stripe.CardError(
+        "Cardholder Alice Secret 4242 declined",
+        param="number",
+        code="card_declined",
+    )
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(payment_mod.PaymentException):
+            mixin.handle_card_error(card_err, fake_payment)
+
+    assert "Alice Secret" not in caplog.text
+    assert "4242" not in caplog.text
+    assert "Alice Secret" not in str(captured)
+    assert captured[-1][1] == "payment.charge"
+    assert captured[-1][2]["outcome"] == OUTCOME_FAILURE
+    assert captured[-1][2]["error_code"] == "card_declined"
+    assert captured[-1][2]["event_id"] == 654
+    assert captured[-1][2]["order_id"] == 321
+
+
+def test_permission_denied_logs_only_for_authenticated_users(captured):
+    views = _import_views()
+    factory = RequestFactory()
+    fake_event = types.SimpleNamespace(pk=77)
+    fake_organizer = types.SimpleNamespace(pk=11)
+
+    req_anon = factory.post("/control/event/org/evt/stripe/disconnect/")
+    req_anon.user = types.SimpleNamespace(is_authenticated=False)
+    req_anon.event = fake_event
+    req_anon.organizer = fake_organizer
+    with pytest.raises(PermissionDenied):
+        views.oauth_disconnect(req_anon)
+    assert captured == []
+
+    req_authed = factory.post("/control/event/org/evt/stripe/disconnect/")
+    req_authed.user = types.SimpleNamespace(
+        pk=42,
+        is_authenticated=True,
+        has_event_permission=lambda *a, **kw: False,
+    )
+    req_authed.event = fake_event
+    req_authed.organizer = fake_organizer
+    with pytest.raises(PermissionDenied):
+        views.oauth_disconnect(req_authed)
+    assert len(captured) == 1
+    assert captured[0][1] == "permission.denied"
+    assert captured[0][2]["outcome"] == OUTCOME_FAILURE
+    assert captured[0][2]["error_code"] == "forbidden"
+    assert captured[0][2]["status"] == 403
+    assert captured[0][2]["user_id"] == 42
+    assert captured[0][2]["event_id"] == 77
+    assert captured[0][2]["model"] == "event"
+    assert captured[0][2]["object_id"] == 77
+
+    captured.clear()
+    settings_view = views.OrganizerSettingsFormView.as_view()
+    req_org = factory.get("/control/organizer/org/stripeconnect/")
+    req_org.user = types.SimpleNamespace(
+        pk=99,
+        is_authenticated=True,
+        is_staff=False,
+        is_superuser=False,
+        has_active_staff_session=lambda *a: False,
+    )
+    req_org.session = types.SimpleNamespace(session_key="k")
+    req_org.organizer = fake_organizer
+    with pytest.raises(PermissionDenied):
+        settings_view(req_org)
+    assert len(captured) == 1
+    assert captured[0][1] == "permission.denied"
+    assert captured[0][2]["user_id"] == 99
+    assert captured[0][2]["model"] == "organizer"
+    assert captured[0][2]["object_id"] == 11
+
+
+def test_sca_return_view_checks_payment_state_after_handler(captured, monkeypatch):
+    views = _import_views()
+    factory = RequestFactory()
+    monkeypatch.setattr(views, "render", lambda req, tpl, ctx: HttpResponse(status=200))
+    monkeypatch.setattr(views, "eventreverse", lambda *a, **kw: "/order/")
+
+    def run_sca(final_state):
+        fake_order = types.SimpleNamespace(
+            pk=10,
+            event_id=20,
+            code="ORD1",
+            secret="sec",
+            refresh_from_db=lambda: None,
+        )
+        fake_payment = types.SimpleNamespace(
+            pk=30,
+            provider="stripe",
+            state=final_state,
+        )
+        fake_prov = types.SimpleNamespace(
+            redirect_action_handling="redirect",
+            _handle_intent_response=lambda req, p: None,
+        )
+        view = views.ScaReturnView()
+        view.order = fake_order
+        view.payment = fake_payment
+        view.pprov = fake_prov
+        req = factory.get("/stripe/sca/ORD1/h/30/return/")
+        req.event = types.SimpleNamespace(pk=20)
+        view.request = req
+        return view.get(req)
+
+    captured.clear()
+    resp_fail = run_sca(views.OrderPayment.PAYMENT_STATE_FAILED)
+    assert resp_fail.status_code == 200
+    assert captured[-1][1] == "payment.sca"
+    assert captured[-1][2]["outcome"] == OUTCOME_FAILURE
+    assert captured[-1][2]["error_code"] == "requires_payment_method"
+
+    captured.clear()
+    resp_ok = run_sca(views.OrderPayment.PAYMENT_STATE_CONFIRMED)
+    assert resp_ok.status_code == 200
+    assert captured[-1][1] == "payment.sca"
+    assert captured[-1][2]["outcome"] == OUTCOME_SUCCESS
