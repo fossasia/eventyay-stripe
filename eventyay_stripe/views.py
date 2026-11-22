@@ -294,6 +294,9 @@ def charge_webhook(event, event_json, charge_id, rso):
         payment = None
 
     with transaction.atomic():
+        # Lock the order first: deliveries for a charge without a payment yet would both find
+        # nothing to lock below and each create a payment or the same refunds.
+        Order.objects.select_for_update(of=OF_SELF).get(pk=order.pk)
         if payment:
             payment = OrderPayment.objects.select_for_update(of=OF_SELF).get(pk=payment.pk)
         else:
@@ -320,7 +323,24 @@ def charge_webhook(event, event_json, charge_id, rso):
 
         order.log_action("eventyay.plugins.stripe.event", data=event_json)
 
-        if charge["amount_refunded"] or charge["refunds"]["total_count"] or charge["dispute"]:
+        has_refunds = charge["amount_refunded"] or charge["refunds"]["total_count"] or charge["dispute"]
+        # A succeeded charge was paid even if it was later refunded or disputed, so confirm a payment
+        # that is still open before recording the refunds against it. Only reopen a canceled or failed
+        # payment when nothing was refunded.
+        reopenable_states = (OrderPayment.PAYMENT_STATE_CANCELED, OrderPayment.PAYMENT_STATE_FAILED)
+        if charge["status"] == "succeeded" and (
+            payment.state in (OrderPayment.PAYMENT_STATE_PENDING, OrderPayment.PAYMENT_STATE_CREATED)
+            or (payment.state in reopenable_states and not has_refunds)
+        ):
+            try:
+                if getattr(charge, "payment_intent", None):
+                    payment.info = str(charge.payment_intent)
+                payment.confirm()
+            except LockTimeoutException:
+                return HttpResponse("Lock timeout, please try again.", status=HTTPStatus.SERVICE_UNAVAILABLE)
+            except Quota.QuotaExceededException:
+                pass
+        if has_refunds:
             known_refunds = [r.info_data.get("id") for r in payment.refunds.all()]
             migrated_refund_amounts = [r.amount for r in payment.refunds.all() if not r.info_data.get("id")]
             for r in charge["refunds"]["data"]:
@@ -341,20 +361,6 @@ def charge_webhook(event, event_json, charge_id, rso):
                         migrated_refund_amounts.remove(a)
                     else:
                         payment.create_external_refund(amount=a, info=str(charge["dispute"]))
-        elif charge["status"] == "succeeded" and payment.state in (
-            OrderPayment.PAYMENT_STATE_PENDING,
-            OrderPayment.PAYMENT_STATE_CREATED,
-            OrderPayment.PAYMENT_STATE_CANCELED,
-            OrderPayment.PAYMENT_STATE_FAILED,
-        ):
-            try:
-                if getattr(charge, "payment_intent", None):
-                    payment.info = str(charge.payment_intent)
-                payment.confirm()
-            except LockTimeoutException:
-                return HttpResponse("Lock timeout, please try again.", status=HTTPStatus.SERVICE_UNAVAILABLE)
-            except Quota.QuotaExceededException:
-                pass
         elif charge["status"] == "failed" and payment.state in (
             OrderPayment.PAYMENT_STATE_PENDING,
             OrderPayment.PAYMENT_STATE_CREATED,
@@ -394,6 +400,8 @@ def source_webhook(event, event_json, source_id, rso):
                 return HttpResponse("Order not found", status=HTTPStatus.OK)
             payment = None
 
+        # Lock the order so concurrent deliveries for a new source cannot both create a payment.
+        Order.objects.select_for_update(of=OF_SELF).get(pk=order.pk)
         if payment:
             payment = OrderPayment.objects.select_for_update(of=OF_SELF).get(pk=payment.pk)
         else:

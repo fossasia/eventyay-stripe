@@ -47,7 +47,7 @@ from pydantic import ValidationError
 from . import __version__
 from .models import ReferencedStripeObject, RegisteredApplePayDomain
 from .tasks import get_stripe_account_key, stripe_verify_domain
-from .utils import shredded_stripe_payment_info, stripe_object_to_dict
+from .utils import shredded_stripe_payment_info, stripe_int_to_decimal, stripe_object_to_dict
 from .validation_models import (
     LatestCharge,
     PaymentInfoData,
@@ -631,6 +631,9 @@ class StripeMethod(BasePaymentProvider):
     def _decimal_to_int(self, amount):
         places = settings.CURRENCY_PLACES.get(self.event.currency, 2)
         return int(amount * 10**places)
+
+    def _amount_to_decimal(self, amount):
+        return stripe_int_to_decimal(amount, settings.CURRENCY_PLACES.get(self.event.currency, 2))
 
     def _get_amount(self, payment):
         return self._decimal_to_int(payment.amount)
