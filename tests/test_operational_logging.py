@@ -583,3 +583,63 @@ def test_sca_return_view_checks_payment_state_after_handler(captured, monkeypatc
     assert resp_ok.status_code == 200
     assert captured[-1][1] == "payment.sca"
     assert captured[-1][2]["outcome"] == OUTCOME_SUCCESS
+
+
+def test_redirect_payment_charge_outcome_semantics(captured, monkeypatch):
+    payment_mod = _import_payment()
+
+    monkeypatch.setattr(
+        payment_mod.ReferencedStripeObject.objects,
+        "get_or_create",
+        lambda **kwargs: (None, False),
+    )
+    prov = payment_mod.StripeMethod.__new__(payment_mod.StripeMethod)
+    prov.event = types.SimpleNamespace(pk=1, currency="EUR", testmode=False)
+    prov.identifier = "stripe"
+    fake_order = types.SimpleNamespace(event_id=10, id=101, pk=101, code="ORD123")
+    payment = types.SimpleNamespace(
+        pk=42,
+        order=fake_order,
+        order_id=101,
+        provider="stripe",
+        state=payment_mod.OrderPayment.PAYMENT_STATE_CREATED,
+        info="{}",
+        save=lambda: None,
+    )
+
+    # 1. Non-terminal intent (requires_action) must NOT emit payment.charge success
+    captured.clear()
+    intent_action = types.SimpleNamespace(id="pi_1", status="requires_action")
+    prov._perform_sca_redirect = lambda req, p: "/sca-url"
+    prov._redirect_payment = lambda intent, req, p: None
+    # Test through _handle_intent_response logic directly
+    prov.payment_is_valid_session = lambda req: False
+    prov.intent_factory = types.SimpleNamespace(retrieve_payment_intent=lambda *a, **k: intent_action)
+    prov._handle_intent_response(None, payment, intent=intent_action)
+    charge_logs = [c for c in captured if c[1] == "payment.charge"]
+    assert charge_logs == []
+
+    # 2. Non-terminal intent (processing) must NOT emit payment.charge success
+    captured.clear()
+    intent_proc = types.SimpleNamespace(id="pi_2", status="processing")
+    prov._handle_intent_response(None, payment, intent=intent_proc)
+    charge_logs = [c for c in captured if c[1] == "payment.charge"]
+    assert charge_logs == []
+
+    # 3. Terminal confirmed intent emits single payment.charge success
+    captured.clear()
+    payment.state = payment_mod.OrderPayment.PAYMENT_STATE_CONFIRMED
+    intent_ok = types.SimpleNamespace(id="pi_3", status="succeeded")
+    prov._handle_intent_response(None, payment, intent=intent_ok)
+    charge_logs = [c for c in captured if c[1] == "payment.charge"]
+    assert len(charge_logs) == 1
+    assert charge_logs[0][2]["outcome"] == OUTCOME_SUCCESS
+    assert charge_logs[0][2]["object_id"] == "pi_3"
+
+    # 4. Nested confirmation does not double-log
+    captured.clear()
+    payment.state = payment_mod.OrderPayment.PAYMENT_STATE_CREATED
+    intent_conf = types.SimpleNamespace(id="pi_4", status="requires_confirmation")
+    prov._handle_intent_response(None, payment, intent=intent_conf)
+    charge_logs = [c for c in captured if c[1] == "payment.charge"]
+    assert charge_logs == []

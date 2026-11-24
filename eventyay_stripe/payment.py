@@ -932,17 +932,33 @@ class StripeMethod(BasePaymentProvider):
                     object_id=getattr(intent, "id", None),
                 )
                 raise
-            failed = payment.state == OrderPayment.PAYMENT_STATE_FAILED
-            log_operation(
-                "payment.charge",
-                OUTCOME_FAILURE if failed else OUTCOME_SUCCESS,
-                backend="stripe",
-                payment_provider=self.identifier or "stripe",
-                error_code="requires_payment_method" if failed else None,
-                event_id=payment.order.event_id,
-                order_id=payment.order_id,
-                object_id=getattr(intent, "id", None),
-            )
+            if getattr(intent, "status", None) != "requires_confirmation":
+                if payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED:
+                    log_operation(
+                        "payment.charge",
+                        OUTCOME_SUCCESS,
+                        backend="stripe",
+                        payment_provider=self.identifier or "stripe",
+                        event_id=payment.order.event_id,
+                        order_id=payment.order_id,
+                        object_id=getattr(intent, "id", None),
+                    )
+                elif payment.state in (
+                    OrderPayment.PAYMENT_STATE_FAILED,
+                    OrderPayment.PAYMENT_STATE_CANCELED,
+                ):
+                    log_operation(
+                        "payment.charge",
+                        OUTCOME_FAILURE,
+                        backend="stripe",
+                        payment_provider=self.identifier or "stripe",
+                        error_code="requires_payment_method"
+                        if payment.state == OrderPayment.PAYMENT_STATE_FAILED
+                        else "canceled",
+                        event_id=payment.order.event_id,
+                        order_id=payment.order_id,
+                        object_id=getattr(intent, "id", None),
+                    )
             return None
 
     def _confirm_intent(self, request, payment):
@@ -995,7 +1011,7 @@ class StripeMethod(BasePaymentProvider):
                     "message": err["message"],
                 }
             )
-            raise PaymentException(_("Stripe reported an error with your card: %s"), err["message"]) from e
+            raise PaymentException(_("Stripe reported an error with your card: %s") % err["message"]) from e
         except stripe.InvalidRequestError as e:
             err = e.json_body["error"] if e.json_body else {"message": str(e)}
             err_code = stripe_error_code(e, "invalid_request")
@@ -1364,17 +1380,33 @@ class StripeCreditCard(StripeMethod):
                     object_id=getattr(intent, "id", None),
                 )
                 raise
-            failed = payment.state == OrderPayment.PAYMENT_STATE_FAILED
-            log_operation(
-                "payment.charge",
-                OUTCOME_FAILURE if failed else OUTCOME_SUCCESS,
-                backend="stripe",
-                payment_provider=self.identifier or "stripe",
-                error_code="requires_payment_method" if failed else None,
-                event_id=payment.order.event_id,
-                order_id=payment.order_id,
-                object_id=getattr(intent, "id", None),
-            )
+            if getattr(intent, "status", None) != "requires_confirmation":
+                if payment.state == OrderPayment.PAYMENT_STATE_CONFIRMED:
+                    log_operation(
+                        "payment.charge",
+                        OUTCOME_SUCCESS,
+                        backend="stripe",
+                        payment_provider=self.identifier or "stripe",
+                        event_id=payment.order.event_id,
+                        order_id=payment.order_id,
+                        object_id=getattr(intent, "id", None),
+                    )
+                elif payment.state in (
+                    OrderPayment.PAYMENT_STATE_FAILED,
+                    OrderPayment.PAYMENT_STATE_CANCELED,
+                ):
+                    log_operation(
+                        "payment.charge",
+                        OUTCOME_FAILURE,
+                        backend="stripe",
+                        payment_provider=self.identifier or "stripe",
+                        error_code="requires_payment_method"
+                        if payment.state == OrderPayment.PAYMENT_STATE_FAILED
+                        else "canceled",
+                        event_id=payment.order.event_id,
+                        order_id=payment.order_id,
+                        object_id=getattr(intent, "id", None),
+                    )
 
     def _confirm_intent(self, request, payment):
         self._init_api()
