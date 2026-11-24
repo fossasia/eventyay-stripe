@@ -21,17 +21,23 @@ except Exception:
 
 try:
     from eventyay.base.operational_logging import (
-        get_job_id as _HOST_GET_JOB_ID,
-    )
-    from eventyay.base.operational_logging import (
-        get_request_id as _HOST_GET_REQUEST_ID,
-    )
-    from eventyay.base.operational_logging import (
         log_event as _HOST_LOG_EVENT,
     )
 except Exception:
     _HOST_LOG_EVENT = None
+
+try:
+    from eventyay.base.operational_logging import (
+        get_request_id as _HOST_GET_REQUEST_ID,
+    )
+except Exception:
     _HOST_GET_REQUEST_ID = None
+
+try:
+    from eventyay.base.operational_logging import (
+        get_job_id as _HOST_GET_JOB_ID,
+    )
+except Exception:
     _HOST_GET_JOB_ID = None
 
 OUTCOME_SUCCESS = "success"
