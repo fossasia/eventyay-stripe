@@ -47,7 +47,7 @@ from pydantic import ValidationError
 from . import __version__
 from .models import ReferencedStripeObject, RegisteredApplePayDomain
 from .tasks import get_stripe_account_key, stripe_verify_domain
-from .utils import shredded_stripe_payment_info
+from .utils import shredded_stripe_payment_info, shredded_stripe_webhook_object
 from .validation_models import (
     LatestCharge,
     PaymentInfoData,
@@ -977,10 +977,9 @@ class StripeMethod(BasePaymentProvider):
             .exclude(data="", shredded=True)
         ):
             d = le.parsed_data
-            if "data" in d:
-                for k, v in list(d["data"]["object"].items()):
-                    if v not in ("reason", "status", "failure_message", "object", "id"):
-                        d["data"]["object"][k] = "█"
+            if isinstance(d.get("data"), dict):
+                if "object" in d["data"]:
+                    d["data"]["object"] = shredded_stripe_webhook_object(d["data"]["object"])
                 le.data = json.dumps(d)
                 le.shredded = True
                 le.save(update_fields=["data", "shredded"])
