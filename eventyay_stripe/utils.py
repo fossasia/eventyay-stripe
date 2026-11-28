@@ -62,3 +62,16 @@ def shredded_stripe_payment_info(payload: dict) -> dict:
             new[key] = payload[key]
     new["_shredded"] = True
     return new
+
+
+WEBHOOK_OBJECT_KEPT_KEYS = frozenset({"reason", "status", "failure_message", "object", "id"})
+
+
+def shredded_stripe_webhook_object(obj):
+    """
+    Mask everything in the object of a stored Stripe webhook event except the keys needed to follow
+    what happened to a payment. Billing details, card data and metadata all sit in the other keys.
+    """
+    if not isinstance(obj, dict):
+        return obj
+    return {key: value if key in WEBHOOK_OBJECT_KEPT_KEYS else "\u2588" for key, value in obj.items()}
